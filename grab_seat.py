@@ -261,6 +261,10 @@ def classify(result):
         return "dup", msg
     if any(k in msg for k in ("未到", "开放", "提前", "还未")):
         return "not_open", msg
+    # 签名盐值一次性失效：同一盐提交第二个时段时返回代码 302，需立即刷新页面取新盐
+    if "302" in msg or any(k in msg for k in ("停留过久", "安全验证",
+                                             "刷新后再提交", "操作超时")):
+        return "salt_expired", msg
     if any(k in msg for k in ("验证", "enc", "签名", "非法", "参数")):
         return "sign", msg
     return "taken", msg or str(result)
@@ -364,13 +368,13 @@ def run(cfg, mode):
 
     while now_bj() < deadline and not all(done):
         attempts += 1
-        if attempts == 1 or attempts % cfg["token_refresh_every"] == 0:
-            res = grabber.refresh_token()
-            if not res[0]:
-                time.sleep(1); continue
         for i, (start, end) in enumerate(segments):
             if done[i]:
                 continue
+            # 签名盐值一次性有效：每个时段提交前都刷新页面取新盐
+            res = grabber.refresh_token()
+            if not res[0]:
+                time.sleep(1); continue
             try:
                 result = grabber.submit_segment(start, end, day)
             except requests.RequestException as e:
@@ -388,6 +392,8 @@ def run(cfg, mode):
             elif kind == "auth":
                 log("登录态失效，重新登录...")
                 grabber.login()
+            elif kind == "salt_expired":
+                log(f"盐值失效，下一时段前自动刷新：{msg}")
             else:
                 log(f"❌ {start}-{end}：{msg}")
         if not all(done):
