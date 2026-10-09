@@ -13,6 +13,10 @@
     "giveup_time": "20:12:00",
     "retry_interval": [0.3, 1.0],
     "token_refresh_every": 20,
+    "sign_window_min": 30,
+    "signback_before_min": 5,
+    "signback_after_min": 5,
+    "sign_retry_interval": [8, 15],
     "serverchan_key": "",
     "popup": false
 }

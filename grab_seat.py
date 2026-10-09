@@ -7,6 +7,8 @@
     python grab_seat.py inspect   # 只登录并分析座位页面结构（不提交，安全）
     python grab_seat.py dryrun    # 立即提交“明天”的预约，用于验证 enc 是否正确（未到 20:00 会被拒）
     python grab_seat.py run       # 正式运行：等待到 20:00:00 自动开抢
+    python grab_seat.py signin    # 自动签到：等首时段开始后自动签到，窗口内持续重试
+    python grab_seat.py signback  # 自动签退：末时段结束前 5 分钟自动退座签退
 配置文件：同目录 config.json；账号密码/推送 key 也支持环境变量（云端部署时使用）
 """
 import argparse
@@ -67,6 +69,10 @@ class SeatGrabber:
     PAGE_URL = "https://office.chaoxing.com/front/apps/seat/code?id={room}&seatNum={seat}"
     PAGE_URL_FALLBACK = "https://office.chaoxing.com/front/third/apps/seat/code?id={room}&seatNum={seat}"
     SUBMIT_API = "https://office.chaoxing.com/data/apps/seat/submit"
+    RESERVELIST_API = ("https://office.chaoxing.com/data/apps/seat/reservelist?"
+                       "indexId=0&pageSize=100&type=-1")
+    SIGN_API = "https://office.chaoxing.com/data/apps/seat/sign"
+    SIGNBACK_API = "https://office.chaoxing.com/data/apps/seat/signback"
 
     # 旧版页面可能使用的固定盐（作为兜底）
     LEGACY_SALT = "%sd`~7^/>N4!Q#){''"
@@ -188,6 +194,35 @@ class SeatGrabber:
         except Exception:
             return {"success": False, "msg": f"响应非JSON：{resp.text[:100]}"}
 
+    # ---- 查询我的预约列表 ----
+    def fetch_reservations(self):
+        headers = dict(self.base_headers, Referer="https://office.chaoxing.com/")
+        resp = self.session.get(self.RESERVELIST_API, headers=headers, timeout=15)
+        try:
+            obj = resp.json()
+        except Exception:
+            return [], {"success": False, "msg": f"响应非JSON：{resp.text[:100]}"}
+        return (obj.get("data") or {}).get("reserveList") or [], obj
+
+    # ---- 签到 / 签退（服务端接口只认预约 id，不校验定位/蓝牙）----
+    def sign_action(self, api, reserve_id):
+        headers = dict(self.base_headers, Referer="https://office.chaoxing.com/")
+        resp = self.session.post(api, data={"id": reserve_id},
+                                 headers=headers, timeout=15)
+        try:
+            return resp.json()
+        except Exception:
+            return {"success": False, "msg": f"响应非JSON：{resp.text[:100]}"}
+
+# ---------------- 预约状态常量 ----------------
+
+RESERVE_STATUS = {0: "待履约", 1: "学习中", 2: "已履约",
+                  3: "暂离中", 5: "被监督中", 7: "已取消"}
+
+def ts_to_bj(ms):
+    """预约列表中的毫秒时间戳 -> 北京时间 datetime"""
+    return dt.datetime.fromtimestamp(int(ms) / 1000, BEIJING)
+
 # ---------------- 通知 ----------------
 
 def push_wechat(key, title, content):
@@ -229,6 +264,19 @@ def classify(result):
     if any(k in msg for k in ("验证", "enc", "签名", "非法", "参数")):
         return "sign", msg
     return "taken", msg or str(result)
+
+def classify_sign(result, action):
+    """签到/签退返回分类：ok / already / auth / fail"""
+    msg = f'{result.get("msg", "")}{result.get("msg2", "")}'.strip()
+    if result.get("success") is True:
+        return "ok", msg
+    if any(k in msg for k in ("登录", "登陆", "未登录")):
+        return "auth", msg
+    done_words = (("已签到", "已落座", "重复签到", "学习中") if action == "signin"
+                  else ("已退座", "已签退", "已结束", "退座成功", "签退成功"))
+    if any(k in msg for k in done_words):
+        return "already", msg
+    return "fail", msg
 
 # ---------------- 主流程 ----------------
 
@@ -363,14 +411,133 @@ def run(cfg, mode):
     if cfg.get("popup"):
         show_popup("抢座结果", "\n".join(lines))
 
+def sleep_until(target_dt):
+    """低频睡到指定北京时间"""
+    while True:
+        gap = (target_dt - now_bj()).total_seconds()
+        if gap <= 0:
+            break
+        time.sleep(0.05 if gap < 2 else min(1, gap))
+
+# ---------------- 签到 / 签退流程 ----------------
+
+def run_sign(cfg, action):
+    grabber = SeatGrabber(cfg)
+    grabber.login()
+
+    def todays():
+        reserves, raw = grabber.fetch_reservations()
+        today = now_bj().date()
+        mine = [r for r in reserves
+                if str(r.get("seatNum")) == str(cfg["seat_num"])
+                and r.get("type", -1) == -1
+                and ts_to_bj(r["startTime"]).date() == today]
+        mine.sort(key=lambda r: int(r["startTime"]))
+        return mine, raw
+
+    mine, raw = todays()
+    if not mine:
+        log(f"今日没有 {cfg['seat_num']} 号座位的有效预约，{action} 无需执行")
+        log(f"接口原始返回：{str(raw)[:200]}")
+        return
+
+    seat = cfg["seat_num"]
+    key = cfg["serverchan_key"]
+    lo, hi = cfg["sign_retry_interval"]
+
+    if action == "signin":
+        target = mine[0]
+        start = ts_to_bj(target["startTime"])
+        deadline = start + dt.timedelta(minutes=cfg["sign_window_min"] - 1)
+        if target.get("status") in (1, 2):
+            log(f"签到已完成（{RESERVE_STATUS.get(target['status'])}），冗余任务静默退出")
+            return
+        log(f"首时段 {start:%H:%M} 开始，等待签到窗口...")
+        sleep_until(start + dt.timedelta(seconds=2))
+        fail_msg = ""
+        while now_bj() < deadline:
+            kind, m = classify_sign(grabber.sign_action(grabber.SIGN_API, target["id"]), action)
+            fail_msg = m
+            if kind in ("ok", "already"):
+                log(f"✅ 签到成功：{m}")
+                push_wechat(key, f"座位{seat}自动签到成功",
+                            f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                            f"签到时间：{now_bj():%H:%M:%S}\n状态：学习中 ✅")
+                return
+            if kind == "auth":
+                log("登录态失效，重新登录..."); grabber.login(); continue
+            log(f"签到暂未成功：{m}")
+            cur, _ = todays()
+            rec = next((r for r in cur if r["id"] == target["id"]), None)
+            if rec and rec.get("status") in (1, 2):
+                log("✅ 预约状态已变为学习中，签到成功")
+                push_wechat(key, f"座位{seat}自动签到成功",
+                            f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                            f"签到时间：{now_bj():%H:%M:%S}\n状态：学习中 ✅")
+                return
+            time.sleep(random.uniform(lo, hi))
+        log("⚠️ 签到窗口用尽仍未成功")
+        push_wechat(key, f"⚠️座位{seat}自动签到失败，请立即手动签到！",
+                    f"最后一次返回：{fail_msg}\n\n"
+                    f"请立刻打开学习通，扫描桌上二维码点击“签到”"
+                    f"（{deadline:%H:%M} 前），逾期记违规！")
+        return
+
+    # ---- signback 自动签退 ----
+    target = mine[-1]
+    end = ts_to_bj(target["endTime"])
+    begin_at = end - dt.timedelta(minutes=cfg["signback_before_min"])
+    deadline = end + dt.timedelta(minutes=cfg["signback_after_min"])
+    if target.get("status") == 2:
+        log("今日已履约（已签退），冗余任务静默退出")
+        return
+    log(f"等待到 {begin_at:%H:%M} 开始签退...")
+    sleep_until(begin_at)
+    fail_msg = ""
+    while now_bj() < deadline:
+        cur, _ = todays()
+        rec = next((r for r in cur if r["id"] == target["id"]), None)
+        # 末时段若仍是待履约，先补一次签到进入学习中，再签退
+        if rec and rec.get("status") == 0:
+            log("末时段仍为待履约，先补签到...")
+            grabber.sign_action(grabber.SIGN_API, target["id"])
+        kind, m = classify_sign(grabber.sign_action(grabber.SIGNBACK_API, target["id"]), action)
+        fail_msg = m
+        if kind in ("ok", "already"):
+            log(f"✅ 签退成功：{m}")
+            push_wechat(key, f"座位{seat}自动签退成功",
+                        f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                        f"签退时间：{now_bj():%H:%M:%S}\n今日履约完成，无违规 🎉")
+            return
+        if kind == "auth":
+            log("登录态失效，重新登录..."); grabber.login(); continue
+        log(f"签退暂未成功：{m}")
+        cur, _ = todays()
+        rec = next((r for r in cur if r["id"] == target["id"]), None)
+        if rec and rec.get("status") == 2:
+            log("✅ 预约状态已变为已履约，签退成功")
+            push_wechat(key, f"座位{seat}自动签退成功",
+                        f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                        f"签退时间：{now_bj():%H:%M:%S}\n今日履约完成，无违规 🎉")
+            return
+        time.sleep(random.uniform(lo, hi))
+    log("⚠️ 签退窗口用尽仍未成功")
+    push_wechat(key, f"⚠️座位{seat}自动签退失败，请立即手动签退！",
+                f"最后一次返回：{fail_msg}\n\n"
+                f"请立刻打开学习通，扫描桌上二维码点击“退座/签退”，"
+                f"离开不签退记违规！")
+
 def main():
     parser = argparse.ArgumentParser(description="图书馆座位自动抢座")
     parser.add_argument("mode", nargs="?",
-                        choices=["inspect", "dryrun", "run"],
+                        choices=["inspect", "dryrun", "run", "signin", "signback"],
                         default=os.environ.get("GRAB_MODE", "run"))
     args = parser.parse_args()
     cfg = load_config()
-    run(cfg, args.mode)
+    if args.mode in ("signin", "signback"):
+        run_sign(cfg, args.mode)
+    else:
+        run(cfg, args.mode)
 
 if __name__ == "__main__":
     main()
