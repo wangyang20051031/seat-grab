@@ -1,0 +1,47 @@
+name: 图书馆抢座
+
+# 每天北京时间 19:15（UTC 11:15）启动，脚本内部精确等待到 20:00:00 提交
+# 提前 45 分钟启动以规避 GitHub 定时任务排队延迟
+on:
+  schedule:
+    - cron: '15 11 * * *'           # 北京时间每天 19:15
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式（run=正式抢座 inspect=只测登录和页面）'
+        type: choice
+        default: run
+        options:
+          - run
+          - inspect
+
+concurrency:
+  group: seat-grab
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  grab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: pip install requests cryptography
+
+      - name: 执行抢座
+        env:
+          CHAOXING_USERNAME: ${{ secrets.CHAOXING_USERNAME }}
+          CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python grab_seat.py ${{ github.event.inputs.mode || 'run' }}

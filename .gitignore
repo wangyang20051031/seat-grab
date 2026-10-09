@@ -1,0 +1,8 @@
+# 含个人账号密码，不进仓库（云端通过 Secrets 注入）
+config.json
+# Python
+__pycache__/
+*.pyc
+# 调试产物
+seat_page.html
+*.log
