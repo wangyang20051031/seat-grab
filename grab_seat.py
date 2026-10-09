@@ -288,11 +288,21 @@ def load_config():
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
     # 环境变量覆盖（GitHub Actions 使用，账号密码不写进仓库）
-    cfg["username"] = os.environ.get("CHAOXING_USERNAME", cfg["username"])
-    cfg["password"] = os.environ.get("CHAOXING_PASSWORD", cfg["password"])
+    # 多账号支持：ACCOUNT_IDX=2 时取第二账号凭据（对应第二个座位）
+    idx = os.environ.get("ACCOUNT_IDX", "1")
+    if idx == "1":
+        cfg["username"] = os.environ.get("CHAOXING_USERNAME", cfg["username"])
+        cfg["password"] = os.environ.get("CHAOXING_PASSWORD", cfg["password"])
+    else:
+        cfg["username"] = os.environ.get(
+            f"CHAOXING_USERNAME_{idx}", cfg.get(f"username_{idx}", ""))
+        cfg["password"] = os.environ.get(
+            f"CHAOXING_PASSWORD_{idx}", cfg.get(f"password_{idx}", ""))
+    # 该账号负责的座位号（云端由矩阵任务指定）
+    cfg["seat_num"] = os.environ.get("SEAT_NUM", cfg["seat_num"])
     cfg["serverchan_key"] = os.environ.get("SERVERCHAN_KEY", cfg["serverchan_key"])
     if not cfg["username"] or not cfg["password"]:
-        sys.exit("请先在 config.json 填写 username/password，或配置对应环境变量")
+        sys.exit(f"账号{idx}凭据缺失：请在 config.json 填写或配置对应环境变量/Secrets")
     return cfg
 
 def wait_until_target(cfg):
