@@ -220,6 +220,10 @@ def classify(result):
         return "success", msg
     if any(k in msg for k in ("登录", "登陆", "未登录")):
         return "auth", msg
+    # 冗余任务重复提交：该时段已被本账号另一任务抢到，视同成功
+    if any(k in msg for k in ("已有预约", "已预约", "时间冲突", "预约冲突",
+                              "存在预约", "重复预约", "已有签到")):
+        return "dup", msg
     if any(k in msg for k in ("未到", "开放", "提前", "还未")):
         return "not_open", msg
     if any(k in msg for k in ("验证", "enc", "签名", "非法", "参数")):
@@ -295,6 +299,7 @@ def run(cfg, mode):
 
     segments = cfg["segments"]
     done = [False] * len(segments)
+    segment_kind = {}      # success / dup
     last_msg = {}
     attempts = 0
     lo, hi = cfg["retry_interval"]
@@ -315,9 +320,13 @@ def run(cfg, mode):
                 log(last_msg[i]); continue
             kind, msg = classify(result)
             last_msg[i] = msg
-            if kind == "success":
+            if kind in ("success", "dup"):
                 done[i] = True
-                log(f"✅ {start}-{end} 预约成功！")
+                segment_kind[i] = kind
+                if kind == "success":
+                    log(f"✅ {start}-{end} 预约成功！")
+                else:
+                    log(f"ℹ️ {start}-{end} 已由另一任务抢到：{msg}")
             elif kind == "auth":
                 log("登录态失效，重新登录...")
                 grabber.login()
@@ -327,12 +336,24 @@ def run(cfg, mode):
             time.sleep(random.uniform(lo, hi))
 
     # ---- 汇总 + 通知 ----
-    success_num = sum(done)
+    success_num = sum(1 for i in range(len(segments)) if segment_kind.get(i) == "success")
+    dup_num = sum(1 for i in range(len(segments)) if segment_kind.get(i) == "dup")
     seat = cfg["seat_num"]
-    title = f"座位{seat}抢座结果：{success_num}/{len(segments)} 个时段成功"
+
+    # 纯冗余任务：一个新时段都没抢到（全部是别人/另一任务已抢），静默不推送
+    if all(done) and success_num == 0 and dup_num > 0:
+        log(f"本任务为冗余运行，{dup_num} 个时段均已被另一任务抢到，不重复通知")
+        return
+
+    title = f"座位{seat}抢座结果：{success_num + dup_num}/{len(segments)} 个时段成功"
     lines = [f"日期：{day}", f"座位：{seat}", f"尝试次数：{attempts}", ""]
     for i, (start, end) in enumerate(segments):
-        status = "✅ 成功" if done[i] else f"❌ 失败（{last_msg.get(i, '未知')}）"
+        if segment_kind.get(i) == "success":
+            status = "✅ 成功"
+        elif segment_kind.get(i) == "dup":
+            status = "✅ 成功（另一任务抢到）"
+        else:
+            status = f"❌ 失败（{last_msg.get(i, '未知')}）"
         lines.append(f"{start}-{end}  {status}")
     content = "\n\n".join(lines)
     log("===== 最终结果 =====")
