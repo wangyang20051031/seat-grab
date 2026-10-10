@@ -432,7 +432,7 @@ def run(cfg, mode):
                 log(f"【ri+{_off}】{ri_body[_off:_off+1400]}")
         except Exception as ex:
             log(f"【reserve/info】查询失败：{ex}")
-        # 收集候选 id：POST index 的 curReserves + reserve/info + 列表
+        # 收集候选 id：index.curReserves + reserve/info + 今日预约（只展示，不调用）
         cand = []
         try:
             jidx = json.loads(idx_body)
@@ -450,16 +450,8 @@ def run(cfg, mode):
                     cand.append(str(r.get("id")))
         except Exception:
             pass
-        # 逐个用 GET 尝试签到（Web 端实际方式）
-        for cid in dict.fromkeys(str(c) for c in cand):
-            try:
-                sr = grabber.session.get(
-                    "https://office.chaoxing.com/data/apps/seat/sign",
-                    params={"id": cid}, headers=hdr, timeout=15)
-                sb = sr.content.decode("utf-8", "replace")
-                log(f"【sign id={cid}】{sb[:300]}")
-            except Exception as ex:
-                log(f"【sign id={cid}】失败：{ex}")
+        log("候选签到 id（inspect 只读，不实际调用）："
+            + ", ".join(dict.fromkeys(str(c) for c in cand)))
         # 签到二维码落地页（侦察其控制器模块，不改变状态）
         _today0 = now_bj().strftime("%Y-%m-%d")
         _rid0 = next((str(r.get("id")) for r in (rl or [])
@@ -591,24 +583,33 @@ def run_sign(cfg, action):
 
     def cur_records():
         """聚合三个来源的本座位记录：index.curReserves / index.nearReserves
-        / reservelist。窗口内任一来源出现待履约记录即可签到，防止接口抖动。"""
+        / reservelist。窗口内任一来源出现待履约记录即可签到，防止接口抖动。
+        关键：只保留“今天”的记录——nearReserves 会夹带历史 status=2 记录，
+        否则签到循环会把历史记录误判为“已学习中”而假成功。"""
+        today = now_bj().date()
         merged = {}
+
+        def put(r):
+            try:
+                if str(r.get("roomId")) == room \
+                        and str(r.get("seatNum")) == seat \
+                        and ts_to_bj(r["startTime"]).date() == today:
+                    merged[str(r.get("id"))] = r
+            except Exception:
+                pass
+
         try:
             idx = grabber.fetch_index()
             data = idx.get("data") or {}
-            for key in ("curReserves", "nearReserves"):
-                for r in (data.get(key) or []):
-                    if str(r.get("roomId")) == room \
-                            and str(r.get("seatNum")) == seat:
-                        merged[str(r.get("id"))] = r
+            for bucket in ("curReserves", "nearReserves"):
+                for r in (data.get(bucket) or []):
+                    put(r)
         except Exception:
             pass
         try:
             reserves, _r = grabber.fetch_reservations()
             for r in reserves:
-                if str(r.get("seatNum")) == seat \
-                        and ts_to_bj(r["startTime"]).date() == now_bj().date():
-                    merged.setdefault(str(r.get("id")), r)
+                put(r)
         except Exception:
             pass
         return list(merged.values())
@@ -675,6 +676,11 @@ def run_sign(cfg, action):
                                 "状态：学习中 ✅")
                     return
                 if st in (0, 3, 5):
+                    # 分时段模式会同时返回 3 条待履约记录，只签“窗口已开启”
+                    # 的那条（startTime 前 20 分钟起）；合并模式仅 1 条全天记录
+                    rstart = ts_to_bj(r["startTime"])
+                    if rstart - dt.timedelta(minutes=swing) > now_bj():
+                        continue
                     acted = True
                     kind, m = classify_sign(
                         grabber.sign_action(grabber.SIGN_API, r["id"]),
@@ -742,6 +748,10 @@ def run_sign(cfg, action):
         for r in curs:
             st = r.get("status")
             rid = r["id"]
+            # 终态记录不操作：2=已履约（分时段模式下前两个时段早已结束）、
+            # 7=已取消、8=未签到失效——否则会对它们误调签退甚至误报成功
+            if st in (2, 7, 8):
+                continue
             # 极端情况：仍是待履约，先补签到再签退
             if st == 0:
                 log("仍是待履约状态，先补签到...")
