@@ -407,7 +407,9 @@ def run(cfg, mode):
         try:
             rr = grabber.session.get(ri_url, headers=hdr, timeout=15)
             ri_body = rr.content.decode("utf-8", "replace")
-            log(f"【reserve/info】{ri_body[:1500]}")
+            log(f"【reserve/info】len={len(ri_body)}")
+            for _off in range(0, len(ri_body), 1400):
+                log(f"【ri+{_off}】{ri_body[_off:_off+1400]}")
         except Exception as ex:
             log(f"【reserve/info】查询失败：{ex}")
         # 收集候选 id：reserve/info 里的全部数字 id + 列表 id
