@@ -459,14 +459,15 @@ def run_sign(cfg, action):
     grabber.login()
 
     def todays():
-        reserves, raw = grabber.fetch_reservations()
-        today = now_bj().date()
-        mine = [r for r in reserves
-                if str(r.get("seatNum")) == str(cfg["seat_num"])
-                and r.get("type", -1) == -1
-                and ts_to_bj(r["startTime"]).date() == today]
-        mine.sort(key=lambda r: int(r["startTime"]))
-        return mine, raw
+            reserves, raw = grabber.fetch_reservations()
+            today = now_bj().date()
+            # 新版系统会把连续时段合并成全天单条记录（type=0）；历史记录 type=-1
+            mine = [r for r in reserves
+                    if str(r.get("seatNum")) == str(cfg["seat_num"])
+                    and r.get("type", -1) in (0, -1)
+                    and ts_to_bj(r["startTime"]).date() == today]
+            mine.sort(key=lambda r: int(r["startTime"]))
+            return mine, raw
 
     mine, raw = todays()
     if not mine:
