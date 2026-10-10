@@ -445,15 +445,12 @@ def run(cfg, mode):
             log(f"【QR落地页】{qr.status_code} len={len(qb)}")
             for s in re.findall(r'<script[^>]*src="([^"]+)"', qb):
                 log(f"  QSCRIPT: {s}")
-            # 内联控制器完整代码：分段输出
-            for m in re.findall(
-                    r'<script(?![^>]*src)[^>]*>(.*?)</script>',
-                    qb, re.S):
-                t = m.strip()
-                if len(t) < 200:
-                    continue
-                for off in range(0, len(t), 1300):
-                    log(f"QINLINE+{off}: {t[off:off+1300]}")
+            # 整个落地页 base64 输出（无换行，本地解码还原）
+            import base64 as _b64m
+            b64 = _b64m.b64encode(qb.encode("utf-8")).decode()
+            log(f"【QRB64 len={len(b64)}】")
+            for off in range(0, len(b64), 1200):
+                log(f"QRB64+{off}:{b64[off:off+1200]}")
             for mm in re.findall(r"[^<>\n]{0,50}(?:签到|签退|违约|学习中)"
                                  r"[^<>\n]{0,50}", qb):
                 log(f"  QKEY: {mm.strip()[:130]}")
