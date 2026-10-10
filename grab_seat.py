@@ -625,20 +625,31 @@ def run_sign(cfg, action):
 
     if action == "signin":
         recs, raw = day_records()
-        if not recs:
-            log(f"今日没有 {seat} 号座位的预约，{action} 无需执行")
-            log(f"接口原始返回：{str(raw)[:200]}")
-            return
-        first = recs[0]
-        if first.get("status") in (1, 2):
-            log(f"签到已完成（{RESERVE_STATUS.get(first.get('status'))}），"
-                "冗余任务静默退出")
-            return
-        # 8 = 未签到违约/失效终态：不再尝试
-        if first.get("status") == 8:
-            log("该预约已因未签到失效（status=8），无法再签到")
-            return
-        start = ts_to_bj(first["startTime"])
+        first = recs[0] if recs else None
+        # 无记录时：用配置的首时段开始时间兜底，窗口内继续轮询等待记录出现
+        if first is None:
+            seg0 = cfg["segments"][0]
+            hh, mm = (seg0[0] if isinstance(seg0, (list, tuple))
+                      else seg0).split(":")[:2]
+            expected_start = now_bj().replace(
+                hour=int(hh), minute=int(mm), second=0, microsecond=0)
+            if now_bj() > expected_start + dt.timedelta(minutes=30):
+                log(f"今日没有 {seat} 号座位的预约，{action} 无需执行")
+                log(f"接口原始返回：{str(raw)[:200]}")
+                return
+            log(f"暂未查询到预约记录，按配置首时段 "
+                f"{expected_start:%H:%M} 在窗口内继续等待...")
+        else:
+            if first.get("status") in (1, 2):
+                log(f"签到已完成（{RESERVE_STATUS.get(first.get('status'))}），"
+                    "冗余任务静默退出")
+                return
+            # 8 = 未签到违约/失效终态：不再尝试
+            if first.get("status") == 8:
+                log("该预约已因未签到失效（status=8），无法再签到")
+                return
+            expected_start = ts_to_bj(first["startTime"])
+        start = expected_start
         # 服务端真实窗口：开始前 20 分钟 ~ 开始后 20 分钟
         swing = cfg["sign_window_min"] - 10
         open_at = start - dt.timedelta(minutes=swing)
@@ -696,17 +707,27 @@ def run_sign(cfg, action):
 
     # ---- signback 自动签退 ----
     recs, raw = day_records()
-    if not recs:
-        log(f"今日没有 {seat} 号座位的预约，{action} 无需执行")
-        return
-    target = recs[-1]
-    if target.get("status") == 2:
-        log("今日已履约（已签退），冗余任务静默退出")
-        return
-    if target.get("status") == 8:
-        log("该预约已失效（status=8），无需签退")
-        return
-    end = ts_to_bj(target["endTime"])
+    target = recs[-1] if recs else None
+    if target is None:
+        # 无记录时用配置末时段结束时间兜底，窗口内继续等
+        segN = cfg["segments"][-1]
+        end_s = segN[1] if isinstance(segN, (list, tuple)) else segN
+        hh, mm = end_s.split(":")[:2]
+        end = now_bj().replace(hour=int(hh), minute=int(mm),
+                               second=0, microsecond=0)
+        if now_bj() > end + dt.timedelta(
+                minutes=cfg["signback_after_min"] + 10):
+            log(f"今日没有 {seat} 号座位的预约，{action} 无需执行")
+            return
+        log(f"暂未查询到预约记录，按配置末时段 {end:%H:%M} 结束继续等待...")
+    else:
+        if target.get("status") == 2:
+            log("今日已履约（已签退），冗余任务静默退出")
+            return
+        if target.get("status") == 8:
+            log("该预约已失效（status=8），无需签退")
+            return
+        end = ts_to_bj(target["endTime"])
     begin_at = end - dt.timedelta(minutes=cfg["signback_before_min"])
     close_at = end + dt.timedelta(minutes=cfg["signback_after_min"])
     log(f"等待到 {begin_at:%H:%M} 开始签退...")
