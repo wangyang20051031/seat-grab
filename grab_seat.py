@@ -445,6 +445,15 @@ def run(cfg, mode):
             log(f"【QR落地页】{qr.status_code} len={len(qb)}")
             for s in re.findall(r'<script[^>]*src="([^"]+)"', qb):
                 log(f"  QSCRIPT: {s}")
+            # 内联控制器完整代码：分段输出
+            for m in re.findall(
+                    r'<script(?![^>]*src)[^>]*>(.*?)</script>',
+                    qb, re.S):
+                t = m.strip()
+                if len(t) < 200:
+                    continue
+                for off in range(0, len(t), 1300):
+                    log(f"QINLINE+{off}: {t[off:off+1300]}")
             for mm in re.findall(r"[^<>\n]{0,50}(?:签到|签退|违约|学习中)"
                                  r"[^<>\n]{0,50}", qb):
                 log(f"  QKEY: {mm.strip()[:130]}")
