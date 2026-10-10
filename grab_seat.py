@@ -582,18 +582,16 @@ def run_sign(cfg, action):
     lo, hi = cfg["sign_retry_interval"]
 
     def cur_records():
-        """聚合三个来源的本座位记录：index.curReserves / index.nearReserves
-        / reservelist。窗口内任一来源出现待履约记录即可签到，防止接口抖动。
-        关键：只保留“今天”的记录——nearReserves 会夹带历史 status=2 记录，
-        否则签到循环会把历史记录误判为“已学习中”而假成功。"""
+        """聚合三个来源的本账号“今日”记录：index.curReserves /
+        index.nearReserves / reservelist。接口只返回当前登录账号本人的预约，
+        故不再按座位过滤——由调用方按“签到窗口”决定签哪条，这样一个账号
+        今天有多条记录（如早上一条已失效 + 晚上一条待签）也能各归各处理。"""
         today = now_bj().date()
         merged = {}
 
         def put(r):
             try:
-                if str(r.get("roomId")) == room \
-                        and str(r.get("seatNum")) == seat \
-                        and ts_to_bj(r["startTime"]).date() == today:
+                if ts_to_bj(r["startTime"]).date() == today:
                     merged[str(r.get("id"))] = r
             except Exception:
                 pass
@@ -615,112 +613,114 @@ def run_sign(cfg, action):
         return list(merged.values())
 
     def day_records():
-        """reservelist 中今日本座位记录（预约提交后夜间即存在）"""
+        """reservelist 中本账号“今日”全部记录（不按座位过滤）。
+        预约提交后夜间即存在，用于确定今天要签的目标。"""
         reserves, raw = grabber.fetch_reservations()
         today = now_bj().date()
         recs = [r for r in reserves
-                if str(r.get("seatNum")) == seat
-                and ts_to_bj(r["startTime"]).date() == today]
+                if ts_to_bj(r["startTime"]).date() == today]
         recs.sort(key=lambda r: int(r["startTime"]))
         return recs, raw
 
     if action == "signin":
-        recs, raw = day_records()
-        first = recs[0] if recs else None
-        seen = bool(first)   # 是否已从任一来源确认“今日确有预约”
-        # 无记录时：用配置的首时段开始时间兜底，窗口内继续轮询等待记录出现
-        if first is None:
-            seg0 = cfg["segments"][0]
-            hh, mm = (seg0[0] if isinstance(seg0, (list, tuple))
-                      else seg0).split(":")[:2]
-            expected_start = now_bj().replace(
-                hour=int(hh), minute=int(mm), second=0, microsecond=0)
-            # 注意：不在此处按固定“+30分钟”退出——调度延迟（今早实测
-            # 延迟到 07:35）+ 接口暂空时会误退。统一交给窗口/补救逻辑处理。
-            log(f"暂未查询到预约记录，按配置首时段 "
-                f"{expected_start:%H:%M} 在窗口内继续等待...")
-        else:
-            if first.get("status") in (1, 2):
-                log(f"签到已完成（{RESERVE_STATUS.get(first.get('status'))}），"
-                    "冗余任务静默退出")
-                return
-            # 8 = 未签到违约/失效终态：不再尝试
-            if first.get("status") == 8:
-                log("该预约已因未签到失效（status=8），无法再签到")
-                return
-            expected_start = ts_to_bj(first["startTime"])
-        start = expected_start
-        # 服务端真实窗口：开始前 20 分钟 ~ 开始后 20 分钟
+        # 服务端真实签到窗口：开始前 20 分钟 ~ 开始后 20 分钟
         swing = cfg["sign_window_min"] - 10
+        late = cfg.get("sign_late_window_min", 10)
+        fail_msg = ""
+        warned = False
+
+        def pick_target():
+            """今日“窗口尚未关闭”的最早一条非终态记录。
+            已死(8)/已取消(7) 一律跳过——修复：早上一条 status=8 会挡住
+            当天晚上另一条待签记录（旧逻辑看到最早记录已死就整体退出）。"""
+            now = now_bj()
+            for r in day_records()[0]:
+                if r.get("status") in (7, 8):
+                    continue
+                rs = ts_to_bj(r["startTime"])
+                if rs + dt.timedelta(minutes=swing) >= now:
+                    return r
+            return None
+
+        target = pick_target()
+        if target is None:
+            # reservelist 偶尔滞后，再用三来源聚合确认今日是否真有预约
+            live = [r for r in cur_records() if r.get("status") not in (7, 8)]
+            if live:
+                target = sorted(live, key=lambda x: int(x["startTime"]))[0]
+            elif cur_records():
+                log("今日预约均已失效/取消，无待签到记录，静默退出")
+                return
+            else:
+                # 今日完全无记录：定时任务兜底，按配置首时段等一个窗口
+                seg0 = cfg["segments"][0]
+                hh, mm = (seg0[0] if isinstance(seg0, (list, tuple))
+                          else seg0).split(":")[:2]
+                start0 = now_bj().replace(
+                    hour=int(hh), minute=int(mm), second=0, microsecond=0)
+                close_at0 = start0 + dt.timedelta(minutes=swing)
+                log(f"未检测到今日预约，按配置首时段 {start0:%H:%M} 等待...")
+                sleep_until(start0 - dt.timedelta(minutes=swing))
+                while now_bj() < close_at0 and target is None:
+                    target = pick_target()
+                    if target is None:
+                        time.sleep(random.uniform(lo, hi))
+                if target is None:
+                    log("窗口内仍未检测到今日预约，静默退出（不发误报告警）")
+                    return
+
+        start = ts_to_bj(target["startTime"])
+        target_id = target.get("id")
         open_at = start - dt.timedelta(minutes=swing)
         close_at = start + dt.timedelta(minutes=swing)
-        log(f"首时段 {start:%H:%M}，等待签到窗口 {open_at:%H:%M} 开启...")
+        log(f"目标 {start:%H:%M}，签到窗口 {open_at:%H:%M}~{close_at:%H:%M}")
         sleep_until(open_at)
         # 极端调度延迟：仍给补救时间
         if now_bj() >= close_at:
-            late = cfg.get("sign_late_window_min", 10)
             close_at = now_bj() + dt.timedelta(minutes=late)
             log(f"已超过正常窗口，进入 {late} 分钟补救尝试")
-        fail_msg = ""
-        warned = False
+
         while now_bj() < close_at:
-            curs = cur_records()
-            if curs:
-                seen = True
-            acted = False
-            for r in curs:
-                st = r.get("status")
-                if st in (1, 2):
-                    log("✅ 预约已是学习中，签到成功")
-                    push_wechat(key, f"座位{seat}自动签到成功",
-                                f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
-                                f"签到时间：{now_bj():%H:%M:%S}\n"
-                                "状态：学习中 ✅")
+            # 每轮取该目标最新状态（可能已被冗余任务签上）
+            latest = next((r for r in cur_records()
+                           if str(r.get("id")) == str(target_id)), None)
+            r = latest or target
+            st = r.get("status")
+            this_seat = r.get("seatNum", seat)
+            if st in (1, 2):
+                log("✅ 预约已是学习中，签到成功")
+                push_wechat(key, f"座位{this_seat}自动签到成功",
+                            f"日期：{now_bj():%Y-%m-%d}\n座位：{this_seat}\n"
+                            f"签到时间：{now_bj():%H:%M:%S}\n状态：学习中 ✅")
+                return
+            if st in (0, 3, 5):
+                kind, m = classify_sign(
+                    grabber.sign_action(grabber.SIGN_API, r["id"]), action)
+                fail_msg = m
+                if kind in ("ok", "already"):
+                    log(f"✅ 签到成功：{m}")
+                    push_wechat(key, f"座位{this_seat}自动签到成功",
+                                f"日期：{now_bj():%Y-%m-%d}\n座位：{this_seat}\n"
+                                f"签到时间：{now_bj():%H:%M:%S}\n状态：学习中 ✅")
                     return
-                if st in (0, 3, 5):
-                    # 分时段模式会同时返回 3 条待履约记录，只签“窗口已开启”
-                    # 的那条（startTime 前 20 分钟起）；合并模式仅 1 条全天记录
-                    rstart = ts_to_bj(r["startTime"])
-                    if rstart - dt.timedelta(minutes=swing) > now_bj():
-                        continue
-                    acted = True
-                    kind, m = classify_sign(
-                        grabber.sign_action(grabber.SIGN_API, r["id"]),
-                        action)
-                    fail_msg = m
-                    if kind in ("ok", "already"):
-                        log(f"✅ 签到成功：{m}")
-                        push_wechat(key, f"座位{seat}自动签到成功",
-                                    f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
-                                    f"签到时间：{now_bj():%H:%M:%S}\n"
-                                    "状态：学习中 ✅")
-                        return
-                    if kind == "auth":
-                        log("登录态失效，重新登录...")
-                        grabber.login()
-                        continue
-                    log(f"签到暂未成功：{m}")
-            # 提前预警：到 07:10（开始+10分钟）仍未确认签到，立刻通知人工
-            # 介入并继续重试——绝不能等到 07:20 窗口关闭才告警（那时无法补救）
+                if kind == "auth":
+                    log("登录态失效，重新登录...")
+                    grabber.login()
+                    continue
+                log(f"签到暂未成功：{m}")
+            # 提前预警：开始 +10 分钟仍未确认，立即通知人工并继续重试
             if not warned and now_bj() >= start + dt.timedelta(minutes=10):
                 warned = True
-                push_wechat(key, f"⚠️座位{seat}自动签到暂未确认，请准备手动！",
+                push_wechat(key, f"⚠️座位{this_seat}自动签到暂未确认，请准备手动！",
                             f"当前时间：{now_bj:%H:%M:%S}\n最后返回：{fail_msg}\n\n"
-                            "脚本仍在自动重试。若 07:18 前未收到“签到成功”：\n"
-                            "1）打开学习通 → 座位预约 → 我的预约 → 点击“签到”；\n"
-                            "2）或到馆立即扫描桌上二维码签到。\n"
-                            "07:20 后无法签到，将记违约！")
-            if not acted:
-                log("各来源暂无待签到记录，窗口内继续轮询...")
+                            "脚本仍在自动重试。请准备：学习通 → 座位预约 → "
+                            "我的预约 → 点击“签到”。")
             time.sleep(random.uniform(lo, hi))
-        curs = cur_records()
-        if any(r.get("status") in (1, 2) for r in curs):
+
+        # 窗口用尽：最后确认一次
+        if any(str(r.get("id")) == str(target_id)
+               and r.get("status") in (1, 2) for r in cur_records()):
             log("✅ 最终确认：已是学习中，签到成功")
-            return
-        # 全程三来源都没看到今日预约：多半确实无预约，静默避免误报；
-        # 只有“确认有预约却没签上”才发失败告警
-        if not seen:
-            log("窗口内各来源均未检测到今日预约，静默退出（不发误报告警）")
             return
         log("⚠️ 签到窗口用尽仍未成功")
         push_wechat(key, f"⚠️座位{seat}自动签到失败，请立即手动签到！",
