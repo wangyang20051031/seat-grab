@@ -633,6 +633,7 @@ def run_sign(cfg, action):
         late = cfg.get("sign_late_window_min", 10)
         fail_msg = ""
         warned = False
+        attempted = False   # 本任务是否实际发起过签到请求（用于区分“我签成的”与“别的班次签的”）
 
         def pick_target():
             """今日最早一条“仍需签到（status 0/3/5）”的记录。
@@ -695,12 +696,16 @@ def run_sign(cfg, action):
             st = r.get("status")
             this_seat = r.get("seatNum", seat)
             if st in (1, 2):
-                log("✅ 预约已是学习中，签到成功")
-                push_wechat(key, f"座位{this_seat}自动签到成功",
-                            f"日期：{now_bj():%Y-%m-%d}\n座位：{this_seat}\n"
-                            f"签到时间：{now_bj():%H:%M:%S}\n状态：学习中 ✅")
+                if attempted:
+                    log("✅ 预约已是学习中，签到成功")
+                    push_wechat(key, f"座位{this_seat}自动签到成功",
+                                f"日期：{now_bj():%Y-%m-%d}\n座位：{this_seat}\n"
+                                f"签到时间：{now_bj():%H:%M:%S}\n状态：学习中 ✅")
+                else:
+                    log("ℹ️ 已被其他冗余班次签到，本任务静默退出（不重复推送）")
                 return
             if st in (0, 3, 5):
+                attempted = True
                 kind, m = classify_sign(
                     grabber.sign_action(grabber.SIGN_API, r["id"]), action)
                 fail_msg = m
@@ -719,7 +724,7 @@ def run_sign(cfg, action):
             if not warned and now_bj() >= start + dt.timedelta(minutes=10):
                 warned = True
                 push_wechat(key, f"⚠️座位{this_seat}自动签到暂未确认，请准备手动！",
-                            f"当前时间：{now_bj:%H:%M:%S}\n最后返回：{fail_msg}\n\n"
+                            f"当前时间：{now_bj():%H:%M:%S}\n最后返回：{fail_msg}\n\n"
                             "脚本仍在自动重试。请准备：学习通 → 座位预约 → "
                             "我的预约 → 点击“签到”。")
             time.sleep(random.uniform(lo, hi))
@@ -727,7 +732,13 @@ def run_sign(cfg, action):
         # 窗口用尽：最后确认一次
         if any(str(r.get("id")) == str(target_id)
                and r.get("status") in (1, 2) for r in cur_records()):
-            log("✅ 最终确认：已是学习中，签到成功")
+            if attempted:
+                log("✅ 最终确认：已是学习中，补推成功通知")
+                push_wechat(key, f"座位{seat}自动签到成功",
+                            f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                            f"签到时间：{now_bj():%H:%M:%S}\n状态：学习中 ✅")
+            else:
+                log("ℹ️ 已被其他冗余班次签到，静默退出")
             return
         log("⚠️ 签到窗口用尽仍未成功")
         push_wechat(key, f"⚠️座位{seat}自动签到失败，请立即手动签到！",
@@ -788,6 +799,7 @@ def run_sign(cfg, action):
         log(f"已超过正常签退窗口，进入 {late} 分钟补救尝试")
     fail_msg = ""
     warned = False
+    attempted = False   # 本任务是否实际发起过签退请求（区分“我签退的”与“别的班次签的”）
     while now_bj() < close_at:
         curs = cur_records()
         if curs:
@@ -801,6 +813,7 @@ def run_sign(cfg, action):
             st = r.get("status")
             rid = r["id"]
             # 极端情况：仍是待履约，先补签到再签退
+            attempted = True
             if st == 0:
                 log("仍是待履约状态，先补签到...")
                 grabber.sign_action(grabber.SIGN_API, rid)
@@ -832,12 +845,15 @@ def run_sign(cfg, action):
                 and not any(r.get("status") in NEED_BACK for r in drec)
                 and any(r.get("status") == 2 for r in drec))
             if done2:
-                log("✅ 已履约，签退成功")
-                _snum = (by_id.get("seatNum") if by_id else seat)
-                push_wechat(key, f"座位{_snum}自动签退成功",
-                            f"日期：{now_bj():%Y-%m-%d}\n座位：{_snum}\n"
-                            f"签退时间：{now_bj():%H:%M:%S}\n"
-                            "今日履约完成，无违规 🎉")
+                if attempted:
+                    log("✅ 已履约，签退成功")
+                    _snum = (by_id.get("seatNum") if by_id else seat)
+                    push_wechat(key, f"座位{_snum}自动签退成功",
+                                f"日期：{now_bj():%Y-%m-%d}\n座位：{_snum}\n"
+                                f"签退时间：{now_bj():%H:%M:%S}\n"
+                                "今日履约完成，无违规 🎉")
+                else:
+                    log("ℹ️ 已被其他冗余班次签退，本任务静默退出（不重复推送）")
                 return
             log("暂无活跃记录，窗口内继续轮询...")
         # 提前预警：到 22:05（结束+5分钟）仍未确认签退，立刻通知人工介入，
@@ -845,7 +861,7 @@ def run_sign(cfg, action):
         if not warned and now_bj() >= end + dt.timedelta(minutes=5):
             warned = True
             push_wechat(key, f"⚠️座位{seat}自动签退暂未确认，请准备手动！",
-                        f"当前时间：{now_bj:%H:%M:%S}\n最后返回：{fail_msg}\n\n"
+                        f"当前时间：{now_bj():%H:%M:%S}\n最后返回：{fail_msg}\n\n"
                         "脚本仍在自动重试。若 22:12 前未收到“签退成功”：\n"
                         "请立即打开学习通 → 座位预约 → 我的预约 → 点击“签退”。\n"
                         "22:20 前签退均有效，超过记违约！")
