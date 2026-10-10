@@ -736,11 +736,38 @@ def run_sign(cfg, action):
         return
 
     # ---- signback 自动签退 ----
+    NEED_BACK = (0, 1, 3, 5)   # 待履约/学习中/暂离/被监督 → 仍需签退
+
+    def pick_signback():
+        """今日“仍需签退”、结束时间最晚的记录。跳过 2/7/8——修复：同一
+        开始时间有多条记录（旧的已履约 status=2 + 新的学习中 status=1）时，
+        旧代码 recs[-1] 取到已履约记录，立刻误判“已签退”而漏掉新记录。"""
+        cands = [r for r in day_records()[0]
+                 if r.get("status") in NEED_BACK]
+        cands += [r for r in cur_records()
+                  if r.get("status") in NEED_BACK]
+        if not cands:
+            return None
+        # 去重后按 endTime 取最晚，平局用 startTime、id 兜底
+        uniq = {str(r.get("id")): r for r in cands}
+        return max(uniq.values(),
+                   key=lambda x: (int(x["endTime"]), int(x["startTime"]),
+                                  int(x.get("id") or 0)))
+
     recs, raw = day_records()
-    target = recs[-1] if recs else None
+    target = pick_signback()
     seen = bool(target)   # 是否已从任一来源确认“今日确有预约”
     if target is None:
-        # 无记录时用配置末时段结束时间兜底，窗口内继续等
+        if recs:
+            # 今天有记录，但没有一条仍需签退：按其终态给出准确结论
+            if any(r.get("status") == 2 for r in recs):
+                log("今日预约均已履约（已签退），冗余任务静默退出")
+            elif all(r.get("status") in (7, 8) for r in recs):
+                log("今日预约均已取消/失效，无需签退，静默退出")
+            else:
+                log("今日预约均已到终态，无需签退，静默退出")
+            return
+        # 确实无记录：用配置末时段结束时间兜底，窗口内继续等
         segN = cfg["segments"][-1]
         end_s = segN[1] if isinstance(segN, (list, tuple)) else segN
         hh, mm = end_s.split(":")[:2]
@@ -750,12 +777,6 @@ def run_sign(cfg, action):
         # 统一交给签退窗口/提前预警处理。
         log(f"暂未查询到预约记录，按配置末时段 {end:%H:%M} 结束继续等待...")
     else:
-        if target.get("status") == 2:
-            log("今日已履约（已签退），冗余任务静默退出")
-            return
-        if target.get("status") == 8:
-            log("该预约已失效（status=8），无需签退")
-            return
         end = ts_to_bj(target["endTime"])
     begin_at = end - dt.timedelta(minutes=cfg["signback_before_min"])
     close_at = end + dt.timedelta(minutes=cfg["signback_after_min"])
@@ -788,8 +809,9 @@ def run_sign(cfg, action):
             fail_msg = m
             if kind in ("ok", "already"):
                 log(f"✅ 签退成功：{m}")
-                push_wechat(key, f"座位{seat}自动签退成功",
-                            f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                _snum = r.get("seatNum", seat)
+                push_wechat(key, f"座位{_snum}自动签退成功",
+                            f"日期：{now_bj():%Y-%m-%d}\n座位：{_snum}\n"
                             f"签退时间：{now_bj():%H:%M:%S}\n"
                             "今日履约完成，无违规 🎉")
                 return
@@ -800,10 +822,20 @@ def run_sign(cfg, action):
                 log(f"签退暂未成功：{m}")
         else:
             drec, _r = day_records()
-            if drec and drec[-1].get("status") == 2:
+            tid = str(target.get("id")) if target else ""
+            by_id = next((r for r in drec if str(r.get("id")) == tid), None) \
+                if tid else None
+            # 只认“我们跟踪的那条”确实已履约；不能再用 drec[-1]（同时间
+            # 旧记录会造成假成功）。无目标时则要求没有任何记录仍需签退。
+            done2 = (by_id is not None and by_id.get("status") == 2) or (
+                target is None and drec
+                and not any(r.get("status") in NEED_BACK for r in drec)
+                and any(r.get("status") == 2 for r in drec))
+            if done2:
                 log("✅ 已履约，签退成功")
-                push_wechat(key, f"座位{seat}自动签退成功",
-                            f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                _snum = (by_id.get("seatNum") if by_id else seat)
+                push_wechat(key, f"座位{_snum}自动签退成功",
+                            f"日期：{now_bj():%Y-%m-%d}\n座位：{_snum}\n"
                             f"签退时间：{now_bj():%H:%M:%S}\n"
                             "今日履约完成，无违规 🎉")
                 return
