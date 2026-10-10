@@ -362,30 +362,27 @@ def run(cfg, mode):
                     f"{body[:150].strip()}")
             except Exception as ex:
                 log(f"PAGE {p}: 失败 {ex}")
-        # 座位系统首页（含“我的预约”入口与专属 JS）
-        for u in (
-            "https://office.chaoxing.com/front/apps/seat/index",
-            "https://office.chaoxing.com/front/third/apps/seat/index?"
-            "fidEnc=7a29a63e25913d21",
-        ):
-            try:
-                rr = grabber.session.get(u, headers=dict(
-                    grabber.base_headers,
-                    Referer="https://office.chaoxing.com/"), timeout=12)
-                body = rr.content.decode("utf-8", "replace")
-                log(f"ENTRY {u[:70]}: {rr.status_code} len={len(body)}")
-                for s in re.findall(r'<script[^>]*src="([^"]+)"', body):
-                    log(f"  ENTRYSCRIPT: {s}")
-                # 内联脚本：提取所有 require([...]) 模块引导名
-                for m in re.findall(
-                        r'<script(?![^>]*src)[^>]*>(.*?)</script>',
-                        body, re.S):
-                    for req in re.findall(r"require\(\[([^\]]+)\]", m):
-                        log(f"  REQMODS: {req.strip()[:500]}")
-                for h3 in set(re.findall(r'href="([^"]+)"', body)):
-                    log(f"  ENTRYHREF: {h3}")
-            except Exception as ex:
-                log(f"ENTRY 失败: {ex}")
+        # App 真实扫码链接（third + fidEnc）：持有人应看到签到卡片
+        u = ("https://office.chaoxing.com/front/third/apps/seat/code"
+             "?id=6287&seatNum=" + str(grabber.cfg["seat_num"]) +
+             "&fidEnc=7a29a63e25913d21")
+        try:
+            rr = grabber.session.get(u, headers=dict(
+                grabber.base_headers,
+                Referer="https://office.chaoxing.com/"), timeout=12)
+            b3 = rr.content.decode("utf-8", "replace")
+            log(f"THIRDCODE: {rr.status_code} len={len(b3)}")
+            for s in re.findall(r'<script[^>]*src="([^"]+)"', b3):
+                log(f"  TCSCRIPT: {s}")
+            for tag in re.findall(r"<input[^>]*>", b3):
+                log(f"  TCINPUT: {tag[:200]}")
+            for kw in ("签到", "签退", "学习中", "违约", "待履约",
+                       "暂离", "退座"):
+                for mm in re.finditer(r"[^<>\n]{0,60}" + kw +
+                                      r"[^<>\n]{0,60}", b3):
+                    log(f"  TCKEY: {mm.group(0).strip()[:150]}")
+        except Exception as ex:
+            log(f"THIRDCODE 失败: {ex}")
         # 座位页对“持有人”会直接渲染预约卡片：提取含状态关键词的行
         for kw in ("预约", "签到", "签退", "学习中", "违约", "待履约",
                    "暂离", "退座", "状态"):
