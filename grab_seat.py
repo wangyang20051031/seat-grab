@@ -390,13 +390,25 @@ def run(cfg, mode):
                 log(f"卡片: {m.group(0).strip()[:120]}")
         # 当前预约实时接口
         hdr = dict(grabber.base_headers, Referer="https://office.chaoxing.com/")
-        for tag2, u in (
-            ("seat/index", "https://office.chaoxing.com/data/apps/seat/index"),
-            ("全部预约", grabber.RESERVELIST_API),
+        idx_body = ""
+        for tag2, u, meth, d2 in (
+            ("seat/index(POST)",
+             "https://office.chaoxing.com/data/apps/seat/index",
+             "POST", {"fidEnc": "7a29a63e25913d21"}),
+            ("全部预约", grabber.RESERVELIST_API, "GET", None),
         ):
             try:
-                rr = grabber.session.get(u, headers=hdr, timeout=15)
-                log(f"【{tag2}】{rr.content.decode('utf-8','replace')[:1500]}")
+                if meth == "POST":
+                    rr = grabber.session.post(u, data=d2, headers=hdr,
+                                              timeout=15)
+                else:
+                    rr = grabber.session.get(u, headers=hdr, timeout=15)
+                body3 = rr.content.decode('utf-8', 'replace')
+                if meth == "POST":
+                    idx_body = body3
+                log(f"【{tag2}】len={len(body3)}")
+                for off in range(0, len(body3), 1400):
+                    log(f"  <{off}>{body3[off:off+1400]}")
             except Exception as ex:
                 log(f"【{tag2}】查询失败：{ex}")
         # 关键接口：座位维度的预约信息（可能返回签到接口认的真实 reserveId）
@@ -412,26 +424,37 @@ def run(cfg, mode):
                 log(f"【ri+{_off}】{ri_body[_off:_off+1400]}")
         except Exception as ex:
             log(f"【reserve/info】查询失败：{ex}")
-        # 收集候选 id：reserve/info 里的全部数字 id + 列表 id
-        cand_ids = re.findall(r'"(?:id|reserveId)"\s*:\s*(\d+)', ri_body)
+        # 收集候选 id：POST index 的 curReserves + reserve/info + 列表
+        cand_ids = re.findall(
+            r'"curReserves"\s*:\s*\[(.*?)\]\s*[,}]', idx_body, re.S)
+        cand = []
+        for seg in cand_ids:
+            cand += re.findall(r'"id"\s*:\s*(\d+)', seg)
+        cand += re.findall(r'"(?:id|reserveId)"\s*:\s*(\d+)', ri_body)
         rl = []
         try:
             rl, _o = grabber.fetch_reservations()
             for r in (rl or []):
                 if str(r.get("today")) == now_bj().strftime("%Y-%m-%d"):
-                    cand_ids.append(str(r.get("id")))
+                    cand.append(str(r.get("id")))
         except Exception:
             pass
-        # GET 方式逐个尝试签到（新系统 Web 端为 GET）
-        for cid in dict.fromkeys(str(c) for c in cand_ids):
-            try:
-                sr = grabber.session.get(
-                    "https://office.chaoxing.com/data/apps/seat/sign",
-                    params={"id": cid}, headers=hdr, timeout=15)
-                sb = sr.content.decode("utf-8", "replace")
-                log(f"【GET sign id={cid}】{sb[:300]}")
-            except Exception as ex:
-                log(f"【GET sign id={cid}】失败：{ex}")
+        # 逐个尝试签到（GET 与 POST 都试）
+        for cid in dict.fromkeys(str(c) for c in cand):
+            for meth in ("GET", "POST"):
+                try:
+                    if meth == "GET":
+                        sr = grabber.session.get(
+                            "https://office.chaoxing.com/data/apps/seat/sign",
+                            params={"id": cid}, headers=hdr, timeout=15)
+                    else:
+                        sr = grabber.session.post(
+                            "https://office.chaoxing.com/data/apps/seat/sign",
+                            data={"id": cid}, headers=hdr, timeout=15)
+                    sb = sr.content.decode("utf-8", "replace")
+                    log(f"【{meth} sign id={cid}】{sb[:300]}")
+                except Exception as ex:
+                    log(f"【{meth} sign id={cid}】失败：{ex}")
         # 签到二维码落地页（侦察其控制器模块，不改变状态）
         _today0 = now_bj().strftime("%Y-%m-%d")
         _rid0 = next((str(r.get("id")) for r in (rl or [])
