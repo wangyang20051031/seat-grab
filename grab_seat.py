@@ -71,6 +71,7 @@ class SeatGrabber:
     SUBMIT_API = "https://office.chaoxing.com/data/apps/seat/submit"
     RESERVELIST_API = ("https://office.chaoxing.com/data/apps/seat/reservelist?"
                        "indexId=0&pageSize=100&type=-1")
+    INDEX_API = "https://office.chaoxing.com/data/apps/seat/index"
     SIGN_API = "https://office.chaoxing.com/data/apps/seat/sign"
     SIGNBACK_API = "https://office.chaoxing.com/data/apps/seat/signback"
 
@@ -204,11 +205,21 @@ class SeatGrabber:
             return [], {"success": False, "msg": f"响应非JSON：{resp.text[:100]}"}
         return (obj.get("data") or {}).get("reserveList") or [], obj
 
-    # ---- 签到 / 签退（服务端接口只认预约 id，不校验定位/蓝牙）----
+    def fetch_index(self):
+        """座位门户数据：curReserves=进行中/待履约（可签到），nearReserves=最近"""
+        headers = dict(self.base_headers, Referer="https://office.chaoxing.com/")
+        resp = self.session.get(
+            self.INDEX_API,
+            params={"fidEnc": self.cfg.get("fid_enc",
+                                           "7a29a63e25913d21")},
+            headers=headers, timeout=15)
+        return resp.json()
+
+    # ---- 签到 / 签退（Web 端为 GET，参数 id；服务端不校验定位/蓝牙）----
     def sign_action(self, api, reserve_id):
         headers = dict(self.base_headers, Referer="https://office.chaoxing.com/")
-        resp = self.session.post(api, data={"id": reserve_id},
-                                 headers=headers, timeout=15)
+        resp = self.session.get(api, params={"id": reserve_id},
+                                headers=headers, timeout=15)
         try:
             return resp.json()
         except Exception:
@@ -570,120 +581,169 @@ def sleep_until(target_dt):
 def run_sign(cfg, action):
     grabber = SeatGrabber(cfg)
     grabber.login()
-    # 预约列表接口要求先访问座位页建立上下文 Cookie，否则返回空列表
+    # 预约/门户接口要求先访问座位页建立上下文 Cookie，否则返回空
     grabber.fetch_seat_page()
 
-    def todays():
-            reserves, raw = grabber.fetch_reservations()
-            today = now_bj().date()
-            # 新版系统会把连续时段合并成全天单条记录（type=0）；历史记录 type=-1
-            mine = [r for r in reserves
-                    if str(r.get("seatNum")) == str(cfg["seat_num"])
-                    and r.get("type", -1) in (0, -1)
-                    and ts_to_bj(r["startTime"]).date() == today]
-            mine.sort(key=lambda r: int(r["startTime"]))
-            return mine, raw
-
-    mine, raw = todays()
-    if not mine:
-        log(f"今日没有 {cfg['seat_num']} 号座位的有效预约，{action} 无需执行")
-        log(f"接口原始返回：{str(raw)[:200]}")
-        return
-
-    seat = cfg["seat_num"]
+    seat = str(cfg["seat_num"])
+    room = str(cfg["room_id"])
     key = cfg["serverchan_key"]
     lo, hi = cfg["sign_retry_interval"]
 
+    def cur_records():
+        """index.curReserves 中本账号本座位的记录（仅含可操作的有效预约）"""
+        try:
+            idx = grabber.fetch_index()
+            data = idx.get("data") or {}
+            out = [r for r in (data.get("curReserves") or [])
+                   if str(r.get("roomId")) == room
+                   and str(r.get("seatNum")) == seat]
+            return out, idx
+        except Exception as ex:
+            return [], {"success": False, "msg": str(ex)}
+
+    def day_records():
+        """reservelist 中今日本座位记录（预约提交后夜间即存在）"""
+        reserves, raw = grabber.fetch_reservations()
+        today = now_bj().date()
+        recs = [r for r in reserves
+                if str(r.get("seatNum")) == seat
+                and ts_to_bj(r["startTime"]).date() == today]
+        recs.sort(key=lambda r: int(r["startTime"]))
+        return recs, raw
+
     if action == "signin":
-        target = mine[0]
-        start = ts_to_bj(target["startTime"])
-        deadline = start + dt.timedelta(minutes=cfg["sign_window_min"] - 1)
-        if target.get("status") in (1, 2):
-            log(f"签到已完成（{RESERVE_STATUS.get(target['status'])}），冗余任务静默退出")
+        recs, raw = day_records()
+        if not recs:
+            log(f"今日没有 {seat} 号座位的预约，{action} 无需执行")
+            log(f"接口原始返回：{str(raw)[:200]}")
             return
-        log(f"首时段 {start:%H:%M} 开始，等待签到窗口...")
-        sleep_until(start + dt.timedelta(seconds=2))
-        # 晚启动（手动触发/调度延迟，已超过正常窗口）：仍立即尝试，给补救窗口
-        late_min = cfg.get("sign_late_window_min", 10)
-        if now_bj() >= deadline:
-            deadline = now_bj() + dt.timedelta(minutes=late_min)
-            log(f"已超过正常签到窗口，进入 {late_min} 分钟补救尝试")
+        first = recs[0]
+        if first.get("status") in (1, 2):
+            log(f"签到已完成（{RESERVE_STATUS.get(first.get('status'))}），"
+                "冗余任务静默退出")
+            return
+        # 8 = 未签到违约/失效终态：不再尝试
+        if first.get("status") == 8:
+            log("该预约已因未签到失效（status=8），无法再签到")
+            return
+        start = ts_to_bj(first["startTime"])
+        # 服务端真实窗口：开始前 20 分钟 ~ 开始后 20 分钟
+        swing = cfg["sign_window_min"] - 10
+        open_at = start - dt.timedelta(minutes=swing)
+        close_at = start + dt.timedelta(minutes=swing)
+        log(f"首时段 {start:%H:%M}，等待签到窗口 {open_at:%H:%M} 开启...")
+        sleep_until(open_at)
+        # 极端调度延迟：仍给补救时间
+        if now_bj() >= close_at:
+            late = cfg.get("sign_late_window_min", 10)
+            close_at = now_bj() + dt.timedelta(minutes=late)
+            log(f"已超过正常窗口，进入 {late} 分钟补救尝试")
         fail_msg = ""
-        while now_bj() < deadline:
-            kind, m = classify_sign(grabber.sign_action(grabber.SIGN_API, target["id"]), action)
-            fail_msg = m
-            if kind in ("ok", "already"):
-                log(f"✅ 签到成功：{m}")
-                push_wechat(key, f"座位{seat}自动签到成功",
-                            f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
-                            f"签到时间：{now_bj():%H:%M:%S}\n状态：学习中 ✅")
-                return
-            if kind == "auth":
-                log("登录态失效，重新登录..."); grabber.login(); continue
-            log(f"签到暂未成功：{m}")
-            cur, _ = todays()
-            rec = next((r for r in cur if r["id"] == target["id"]), None)
-            if rec and rec.get("status") in (1, 2):
-                log("✅ 预约状态已变为学习中，签到成功")
-                push_wechat(key, f"座位{seat}自动签到成功",
-                            f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
-                            f"签到时间：{now_bj():%H:%M:%S}\n状态：学习中 ✅")
-                return
+        while now_bj() < close_at:
+            curs, _i = cur_records()
+            acted = False
+            for r in curs:
+                st = r.get("status")
+                if st in (1, 2):
+                    log("✅ 预约已是学习中，签到成功")
+                    push_wechat(key, f"座位{seat}自动签到成功",
+                                f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                                f"签到时间：{now_bj():%H:%M:%S}\n"
+                                "状态：学习中 ✅")
+                    return
+                if st in (0, 3, 5):
+                    acted = True
+                    kind, m = classify_sign(
+                        grabber.sign_action(grabber.SIGN_API, r["id"]),
+                        action)
+                    fail_msg = m
+                    if kind in ("ok", "already"):
+                        log(f"✅ 签到成功：{m}")
+                        push_wechat(key, f"座位{seat}自动签到成功",
+                                    f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                                    f"签到时间：{now_bj():%H:%M:%S}\n"
+                                    "状态：学习中 ✅")
+                        return
+                    if kind == "auth":
+                        log("登录态失效，重新登录...")
+                        grabber.login()
+                        continue
+                    log(f"签到暂未成功：{m}")
+            if not acted:
+                log("curReserves 暂无待签到记录，窗口内继续轮询...")
             time.sleep(random.uniform(lo, hi))
+        curs, _i = cur_records()
+        if any(r.get("status") in (1, 2) for r in curs):
+            log("✅ 最终确认：已是学习中，签到成功")
+            return
         log("⚠️ 签到窗口用尽仍未成功")
         push_wechat(key, f"⚠️座位{seat}自动签到失败，请立即手动签到！",
                     f"最后一次返回：{fail_msg}\n\n"
-                    f"请立刻打开学习通，扫描桌上二维码点击“签到”"
-                    f"（{deadline:%H:%M} 前），逾期记违规！")
+                    "请立刻打开学习通扫描桌上二维码点击“签到”，逾期记违规！")
         return
 
     # ---- signback 自动签退 ----
-    target = mine[-1]
-    end = ts_to_bj(target["endTime"])
-    begin_at = end - dt.timedelta(minutes=cfg["signback_before_min"])
-    deadline = end + dt.timedelta(minutes=cfg["signback_after_min"])
+    recs, raw = day_records()
+    if not recs:
+        log(f"今日没有 {seat} 号座位的预约，{action} 无需执行")
+        return
+    target = recs[-1]
     if target.get("status") == 2:
         log("今日已履约（已签退），冗余任务静默退出")
         return
+    if target.get("status") == 8:
+        log("该预约已失效（status=8），无需签退")
+        return
+    end = ts_to_bj(target["endTime"])
+    begin_at = end - dt.timedelta(minutes=cfg["signback_before_min"])
+    close_at = end + dt.timedelta(minutes=cfg["signback_after_min"])
     log(f"等待到 {begin_at:%H:%M} 开始签退...")
     sleep_until(begin_at)
-    # 极端调度延迟超过正常窗口：仍给补救时间
-    if now_bj() >= deadline:
-        deadline = now_bj() + dt.timedelta(minutes=cfg.get("sign_late_window_min", 10))
-        log(f"已超过正常签退窗口，进入 {cfg.get('sign_late_window_min', 10)} 分钟补救尝试")
+    if now_bj() >= close_at:
+        late = cfg.get("sign_late_window_min", 10)
+        close_at = now_bj() + dt.timedelta(minutes=late)
+        log(f"已超过正常签退窗口，进入 {late} 分钟补救尝试")
     fail_msg = ""
-    while now_bj() < deadline:
-        cur, _ = todays()
-        rec = next((r for r in cur if r["id"] == target["id"]), None)
-        # 末时段若仍是待履约，先补一次签到进入学习中，再签退
-        if rec and rec.get("status") == 0:
-            log("末时段仍为待履约，先补签到...")
-            grabber.sign_action(grabber.SIGN_API, target["id"])
-        kind, m = classify_sign(grabber.sign_action(grabber.SIGNBACK_API, target["id"]), action)
-        fail_msg = m
-        if kind in ("ok", "already"):
-            log(f"✅ 签退成功：{m}")
-            push_wechat(key, f"座位{seat}自动签退成功",
-                        f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
-                        f"签退时间：{now_bj():%H:%M:%S}\n今日履约完成，无违规 🎉")
-            return
-        if kind == "auth":
-            log("登录态失效，重新登录..."); grabber.login(); continue
-        log(f"签退暂未成功：{m}")
-        cur, _ = todays()
-        rec = next((r for r in cur if r["id"] == target["id"]), None)
-        if rec and rec.get("status") == 2:
-            log("✅ 预约状态已变为已履约，签退成功")
-            push_wechat(key, f"座位{seat}自动签退成功",
-                        f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
-                        f"签退时间：{now_bj():%H:%M:%S}\n今日履约完成，无违规 🎉")
-            return
+    while now_bj() < close_at:
+        curs, _i = cur_records()
+        for r in curs:
+            st = r.get("status")
+            rid = r["id"]
+            # 极端情况：仍是待履约，先补签到再签退
+            if st == 0:
+                log("仍是待履约状态，先补签到...")
+                grabber.sign_action(grabber.SIGN_API, rid)
+            kind, m = classify_sign(
+                grabber.sign_action(grabber.SIGNBACK_API, rid), action)
+            fail_msg = m
+            if kind in ("ok", "already"):
+                log(f"✅ 签退成功：{m}")
+                push_wechat(key, f"座位{seat}自动签退成功",
+                            f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                            f"签退时间：{now_bj():%H:%M:%S}\n"
+                            "今日履约完成，无违规 🎉")
+                return
+            if kind == "auth":
+                log("登录态失效，重新登录...")
+                grabber.login()
+                continue
+            log(f"签退暂未成功：{m}")
+        if not curs:
+            drec, _r = day_records()
+            if drec and drec[-1].get("status") == 2:
+                log("✅ 已履约，签退成功")
+                push_wechat(key, f"座位{seat}自动签退成功",
+                            f"日期：{now_bj():%Y-%m-%d}\n座位：{seat}\n"
+                            f"签退时间：{now_bj():%H:%M:%S}\n"
+                            "今日履约完成，无违规 🎉")
+                return
+            log("curReserves 暂无记录，窗口内继续轮询...")
         time.sleep(random.uniform(lo, hi))
     log("⚠️ 签退窗口用尽仍未成功")
     push_wechat(key, f"⚠️座位{seat}自动签退失败，请立即手动签退！",
                 f"最后一次返回：{fail_msg}\n\n"
-                f"请立刻打开学习通，扫描桌上二维码点击“退座/签退”，"
-                f"离开不签退记违规！")
+                "请立刻打开学习通扫描桌上二维码点击“退座/签退”，"
+                "离开不签退记违规！")
 
 def main():
     parser = argparse.ArgumentParser(description="图书馆座位自动抢座")
