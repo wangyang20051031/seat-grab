@@ -457,6 +457,8 @@ def sleep_until(target_dt):
 def run_sign(cfg, action):
     grabber = SeatGrabber(cfg)
     grabber.login()
+    # 预约列表接口要求先访问座位页建立上下文 Cookie，否则返回空列表
+    grabber.fetch_seat_page()
 
     def todays():
             reserves, raw = grabber.fetch_reservations()
