@@ -345,6 +345,23 @@ def run(cfg, mode):
         log("===== 页面分析结果 =====")
         log(f"token: {info['token']}")
         log(f"algorithm: {info['algorithm']}")
+        # 提取页面全部脚本与链接，定位“我的预约”入口与专属 JS
+        for s in re.findall(r'<script[^>]*src="([^"]+)"', html):
+            log(f"SCRIPT: {s}")
+        for s2 in set(re.findall(r'href="([^"]+)"', html)):
+            log(f"HREF: {s2}")
+        # 尝试云端打开“我的预约”候选页面（本地被 WAF 拦，云端 IP 干净）
+        for p in ("myReserve", "mine", "my", "myreserve", "myReservations"):
+            u = f"https://office.chaoxing.com/front/apps/seat/{p}"
+            try:
+                rr = grabber.session.get(u, headers=hdr0 := dict(
+                    grabber.base_headers,
+                    Referer="https://office.chaoxing.com/"), timeout=10)
+                body = rr.content.decode("utf-8", "replace")
+                log(f"PAGE {p}: {rr.status_code} len={len(body)} "
+                    f"{body[:150].strip()}")
+            except Exception as ex:
+                log(f"PAGE {p}: 失败 {ex}")
         # 座位页对“持有人”会直接渲染预约卡片：提取含状态关键词的行
         for kw in ("预约", "签到", "签退", "学习中", "违约", "待履约",
                    "暂离", "退座", "状态"):
