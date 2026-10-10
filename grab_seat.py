@@ -490,6 +490,11 @@ def run_sign(cfg, action):
             return
         log(f"首时段 {start:%H:%M} 开始，等待签到窗口...")
         sleep_until(start + dt.timedelta(seconds=2))
+        # 晚启动（手动触发/调度延迟，已超过正常窗口）：仍立即尝试，给补救窗口
+        late_min = cfg.get("sign_late_window_min", 10)
+        if now_bj() >= deadline:
+            deadline = now_bj() + dt.timedelta(minutes=late_min)
+            log(f"已超过正常签到窗口，进入 {late_min} 分钟补救尝试")
         fail_msg = ""
         while now_bj() < deadline:
             kind, m = classify_sign(grabber.sign_action(grabber.SIGN_API, target["id"]), action)
@@ -529,6 +534,10 @@ def run_sign(cfg, action):
         return
     log(f"等待到 {begin_at:%H:%M} 开始签退...")
     sleep_until(begin_at)
+    # 极端调度延迟超过正常窗口：仍给补救时间
+    if now_bj() >= deadline:
+        deadline = now_bj() + dt.timedelta(minutes=cfg.get("sign_late_window_min", 10))
+        log(f"已超过正常签退窗口，进入 {cfg.get('sign_late_window_min', 10)} 分钟补救尝试")
     fail_msg = ""
     while now_bj() < deadline:
         cur, _ = todays()

@@ -17,6 +17,7 @@
     "signback_before_min": 5,
     "signback_after_min": 8,
     "sign_retry_interval": [8, 15],
+    "sign_late_window_min": 10,
     "serverchan_key": "",
     "popup": false
 }
