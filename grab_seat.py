@@ -345,22 +345,23 @@ def run(cfg, mode):
         log("===== 页面分析结果 =====")
         log(f"token: {info['token']}")
         log(f"algorithm: {info['algorithm']}")
-        log("页面所有 input 字段：")
-        for name, val in info["hidden_inputs"]:
-            log(f"  {name} = {val[:60]}")
-        log(f"完整页面已保存：{page_path}")
-        # 同时回报“我的预约”真实状态（云端排障用）：带过滤与不带过滤两种
+        # 座位页对“持有人”会直接渲染预约卡片：提取含状态关键词的行
+        for kw in ("预约", "签到", "签退", "学习中", "违约", "待履约",
+                   "暂离", "退座", "状态"):
+            for m in re.finditer(r"[^<>\n]{0,80}" + kw + r"[^<>\n]{0,80}", html):
+                log(f"卡片: {m.group(0).strip()[:120]}")
+        # 当前预约实时接口
         hdr = dict(grabber.base_headers, Referer="https://office.chaoxing.com/")
         for tag2, u in (
+            ("seat/index", "https://office.chaoxing.com/data/apps/seat/index"),
             ("全部预约", grabber.RESERVELIST_API),
-            ("未过滤", "https://office.chaoxing.com/data/apps/seat/reservelist?"
-                       "indexId=0&pageSize=100"),
         ):
             try:
                 rr = grabber.session.get(u, headers=hdr, timeout=15)
                 log(f"【{tag2}】{rr.content.decode('utf-8','replace')[:1500]}")
             except Exception as ex:
                 log(f"【{tag2}】查询失败：{ex}")
+        log(f"完整页面已保存：{page_path}")
         return
 
     # 预约日期：北京时间明天（day_offset 可配置）
