@@ -166,7 +166,9 @@ class SeatGrabber:
         info = self.parse_page(html)
         if not info["token"]:
             log(f"未提取到签名盐值，页面地址：{page_url}")
-            return False
+            # 始终返回三元组，保持返回类型一致（旧代码 return False 会让
+            # 调用方三元组解包 / res[0] 下标崩溃）。html 仍带回，供侦察分析。
+            return False, html, info
         self.page_salt = info["token"]
         log(f"签名盐值已更新：{self.page_salt[:16]}...")
         return True, html, info
@@ -350,6 +352,9 @@ def run(cfg, mode):
 
     if mode == "inspect":
         ok, html, info = grabber.refresh_token()
+        if not ok:
+            log("⚠️ 未取到签名盐值——通常是该账号当前持有活跃预约，座位页"
+                "渲染成“预约卡片”而非抢座表单。仍保存页面并继续侦察...")
         page_path = os.path.join(HERE, "seat_page.html")
         with open(page_path, "w", encoding="utf-8") as f:
             f.write(html)
