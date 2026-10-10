@@ -590,16 +590,28 @@ def run_sign(cfg, action):
     lo, hi = cfg["sign_retry_interval"]
 
     def cur_records():
-        """index.curReserves 中本账号本座位的记录（仅含可操作的有效预约）"""
+        """聚合三个来源的本座位记录：index.curReserves / index.nearReserves
+        / reservelist。窗口内任一来源出现待履约记录即可签到，防止接口抖动。"""
+        merged = {}
         try:
             idx = grabber.fetch_index()
             data = idx.get("data") or {}
-            out = [r for r in (data.get("curReserves") or [])
-                   if str(r.get("roomId")) == room
-                   and str(r.get("seatNum")) == seat]
-            return out, idx
-        except Exception as ex:
-            return [], {"success": False, "msg": str(ex)}
+            for key in ("curReserves", "nearReserves"):
+                for r in (data.get(key) or []):
+                    if str(r.get("roomId")) == room \
+                            and str(r.get("seatNum")) == seat:
+                        merged[str(r.get("id"))] = r
+        except Exception:
+            pass
+        try:
+            reserves, _r = grabber.fetch_reservations()
+            for r in reserves:
+                if str(r.get("seatNum")) == seat \
+                        and ts_to_bj(r["startTime"]).date() == now_bj().date():
+                    merged.setdefault(str(r.get("id")), r)
+        except Exception:
+            pass
+        return list(merged.values())
 
     def day_records():
         """reservelist 中今日本座位记录（预约提交后夜间即存在）"""
@@ -640,7 +652,7 @@ def run_sign(cfg, action):
             log(f"已超过正常窗口，进入 {late} 分钟补救尝试")
         fail_msg = ""
         while now_bj() < close_at:
-            curs, _i = cur_records()
+            curs = cur_records()
             acted = False
             for r in curs:
                 st = r.get("status")
@@ -670,9 +682,9 @@ def run_sign(cfg, action):
                         continue
                     log(f"签到暂未成功：{m}")
             if not acted:
-                log("curReserves 暂无待签到记录，窗口内继续轮询...")
+                log("各来源暂无待签到记录，窗口内继续轮询...")
             time.sleep(random.uniform(lo, hi))
-        curs, _i = cur_records()
+        curs = cur_records()
         if any(r.get("status") in (1, 2) for r in curs):
             log("✅ 最终确认：已是学习中，签到成功")
             return
@@ -705,7 +717,7 @@ def run_sign(cfg, action):
         log(f"已超过正常签退窗口，进入 {late} 分钟补救尝试")
     fail_msg = ""
     while now_bj() < close_at:
-        curs, _i = cur_records()
+        curs = cur_records()
         for r in curs:
             st = r.get("status")
             rid = r["id"]
