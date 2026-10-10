@@ -635,26 +635,28 @@ def run_sign(cfg, action):
         warned = False
 
         def pick_target():
-            """今日“窗口尚未关闭”的最早一条非终态记录。
-            已死(8)/已取消(7) 一律跳过——修复：早上一条 status=8 会挡住
-            当天晚上另一条待签记录（旧逻辑看到最早记录已死就整体退出）。"""
-            now = now_bj()
-            for r in day_records()[0]:
-                if r.get("status") in (7, 8):
-                    continue
-                rs = ts_to_bj(r["startTime"])
-                if rs + dt.timedelta(minutes=swing) >= now:
+            """今日最早一条“仍需签到（status 0/3/5）”的记录。
+            选择时跳过 1/2/7/8——修复旧逻辑两个问题：①只跳 7/8 且要求窗口
+            未关，会漏掉状态 0 的新预约；②兜底里挑中“已履约(2)”旧记录报
+            假成功。是否到窗口由后面 open_at 等待 / 补救逻辑负责。"""
+            for r in sorted(day_records()[0],
+                            key=lambda x: int(x["startTime"])):
+                if r.get("status") in (0, 3, 5):
                     return r
             return None
 
         target = pick_target()
         if target is None:
             # reservelist 偶尔滞后，再用三来源聚合确认今日是否真有预约
-            live = [r for r in cur_records() if r.get("status") not in (7, 8)]
+            live = [r for r in cur_records() if r.get("status") in (0, 3, 5)]
             if live:
                 target = sorted(live, key=lambda x: int(x["startTime"]))[0]
             elif cur_records():
-                log("今日预约均已失效/取消，无待签到记录，静默退出")
+                _all = cur_records()
+                if any(r.get("status") in (1, 2) for r in _all):
+                    log("今日预约已签到/履约，无待签到记录，静默退出")
+                else:
+                    log("今日预约均已失效/取消，无待签到记录，静默退出")
                 return
             else:
                 # 今日完全无记录：定时任务兜底，按配置首时段等一个窗口
