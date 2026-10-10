@@ -376,13 +376,12 @@ def run(cfg, mode):
                 log(f"ENTRY {u[:70]}: {rr.status_code} len={len(body)}")
                 for s in re.findall(r'<script[^>]*src="([^"]+)"', body):
                     log(f"  ENTRYSCRIPT: {s}")
-                # 内联脚本：含模块路由/初始状态
+                # 内联脚本：提取所有 require([...]) 模块引导名
                 for m in re.findall(
                         r'<script(?![^>]*src)[^>]*>(.*?)</script>',
                         body, re.S):
-                    t = m.strip()
-                    if t:
-                        log(f"  ENTRYINLINE: {t[:1800]}")
+                    for req in re.findall(r"require\(\[([^\]]+)\]", m):
+                        log(f"  REQMODS: {req.strip()[:500]}")
                 for h3 in set(re.findall(r'href="([^"]+)"', body)):
                     log(f"  ENTRYHREF: {h3}")
             except Exception as ex:
