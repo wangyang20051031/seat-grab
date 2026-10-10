@@ -399,6 +399,36 @@ def run(cfg, mode):
                 log(f"【{tag2}】{rr.content.decode('utf-8','replace')[:1500]}")
             except Exception as ex:
                 log(f"【{tag2}】查询失败：{ex}")
+        # 关键接口：座位维度的预约信息（可能返回签到接口认的真实 reserveId）
+        seat = str(grabber.cfg["seat_num"])
+        ri_url = ("https://office.chaoxing.com/data/apps/seat/reserve/info"
+                  f"?id=6287&seatNum={seat}")
+        ri_body = ""
+        try:
+            rr = grabber.session.get(ri_url, headers=hdr, timeout=15)
+            ri_body = rr.content.decode("utf-8", "replace")
+            log(f"【reserve/info】{ri_body[:1500]}")
+        except Exception as ex:
+            log(f"【reserve/info】查询失败：{ex}")
+        # 收集候选 id：reserve/info 里的全部数字 id + 列表 id
+        cand_ids = re.findall(r'"(?:id|reserveId)"\s*:\s*(\d+)', ri_body)
+        try:
+            rl, _o = grabber.fetch_reservations()
+            for r in (rl or []):
+                if str(r.get("today")) == now_bj().strftime("%Y-%m-%d"):
+                    cand_ids.append(str(r.get("id")))
+        except Exception:
+            pass
+        # GET 方式逐个尝试签到（新系统 Web 端为 GET）
+        for cid in dict.fromkeys(str(c) for c in cand_ids):
+            try:
+                sr = grabber.session.get(
+                    "https://office.chaoxing.com/data/apps/seat/sign",
+                    params={"id": cid}, headers=hdr, timeout=15)
+                sb = sr.content.decode("utf-8", "replace")
+                log(f"【GET sign id={cid}】{sb[:300]}")
+            except Exception as ex:
+                log(f"【GET sign id={cid}】失败：{ex}")
         log(f"完整页面已保存：{page_path}")
         return
 
