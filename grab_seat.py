@@ -414,6 +414,7 @@ def run(cfg, mode):
             log(f"【reserve/info】查询失败：{ex}")
         # 收集候选 id：reserve/info 里的全部数字 id + 列表 id
         cand_ids = re.findall(r'"(?:id|reserveId)"\s*:\s*(\d+)', ri_body)
+        rl = []
         try:
             rl, _o = grabber.fetch_reservations()
             for r in (rl or []):
@@ -431,6 +432,24 @@ def run(cfg, mode):
                 log(f"【GET sign id={cid}】{sb[:300]}")
             except Exception as ex:
                 log(f"【GET sign id={cid}】失败：{ex}")
+        # 签到二维码落地页（侦察其控制器模块，不改变状态）
+        _today0 = now_bj().strftime("%Y-%m-%d")
+        _rid0 = next((str(r.get("id")) for r in (rl or [])
+                      if str(r.get("today")) == _today0), "")
+        qurl = ("https://office.chaoxing.com/front/third/apps/seat/index"
+                "?fidEnc=7a29a63e25913d21&num=" + seat +
+                "&reserveId=" + _rid0 + "&room=6287")
+        try:
+            qr = grabber.session.get(qurl, headers=hdr, timeout=15)
+            qb = qr.content.decode("utf-8", "replace")
+            log(f"【QR落地页】{qr.status_code} len={len(qb)}")
+            for s in re.findall(r'<script[^>]*src="([^"]+)"', qb):
+                log(f"  QSCRIPT: {s}")
+            for mm in re.findall(r"[^<>\n]{0,50}(?:签到|签退|违约|学习中)"
+                                 r"[^<>\n]{0,50}", qb):
+                log(f"  QKEY: {mm.strip()[:130]}")
+        except Exception as ex:
+            log(f"【QR落地页】失败：{ex}")
         log(f"完整页面已保存：{page_path}")
         return
 
