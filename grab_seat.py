@@ -392,19 +392,16 @@ def run(cfg, mode):
         hdr = dict(grabber.base_headers, Referer="https://office.chaoxing.com/")
         idx_body = ""
         for tag2, u, meth, d2 in (
-            ("seat/index(POST)",
+            ("seat/index",
              "https://office.chaoxing.com/data/apps/seat/index",
-             "POST", {"fidEnc": "7a29a63e25913d21"}),
+             "GET", {"fidEnc": "7a29a63e25913d21"}),
             ("全部预约", grabber.RESERVELIST_API, "GET", None),
         ):
             try:
-                if meth == "POST":
-                    rr = grabber.session.post(u, data=d2, headers=hdr,
-                                              timeout=15)
-                else:
-                    rr = grabber.session.get(u, headers=hdr, timeout=15)
+                rr = grabber.session.get(u, params=d2, headers=hdr,
+                                         timeout=15)
                 body3 = rr.content.decode('utf-8', 'replace')
-                if meth == "POST":
+                if tag2 == "seat/index":
                     idx_body = body3
                 log(f"【{tag2}】len={len(body3)}")
                 for off in range(0, len(body3), 1400):
@@ -425,11 +422,14 @@ def run(cfg, mode):
         except Exception as ex:
             log(f"【reserve/info】查询失败：{ex}")
         # 收集候选 id：POST index 的 curReserves + reserve/info + 列表
-        cand_ids = re.findall(
-            r'"curReserves"\s*:\s*\[(.*?)\]\s*[,}]', idx_body, re.S)
         cand = []
-        for seg in cand_ids:
-            cand += re.findall(r'"id"\s*:\s*(\d+)', seg)
+        try:
+            jidx = json.loads(idx_body)
+            for cr in (jidx.get("data") or {}).get("curReserves") or []:
+                if str(cr.get("id")):
+                    cand.append(str(cr.get("id")))
+        except Exception:
+            pass
         cand += re.findall(r'"(?:id|reserveId)"\s*:\s*(\d+)', ri_body)
         rl = []
         try:
@@ -439,22 +439,16 @@ def run(cfg, mode):
                     cand.append(str(r.get("id")))
         except Exception:
             pass
-        # 逐个尝试签到（GET 与 POST 都试）
+        # 逐个用 GET 尝试签到（Web 端实际方式）
         for cid in dict.fromkeys(str(c) for c in cand):
-            for meth in ("GET", "POST"):
-                try:
-                    if meth == "GET":
-                        sr = grabber.session.get(
-                            "https://office.chaoxing.com/data/apps/seat/sign",
-                            params={"id": cid}, headers=hdr, timeout=15)
-                    else:
-                        sr = grabber.session.post(
-                            "https://office.chaoxing.com/data/apps/seat/sign",
-                            data={"id": cid}, headers=hdr, timeout=15)
-                    sb = sr.content.decode("utf-8", "replace")
-                    log(f"【{meth} sign id={cid}】{sb[:300]}")
-                except Exception as ex:
-                    log(f"【{meth} sign id={cid}】失败：{ex}")
+            try:
+                sr = grabber.session.get(
+                    "https://office.chaoxing.com/data/apps/seat/sign",
+                    params={"id": cid}, headers=hdr, timeout=15)
+                sb = sr.content.decode("utf-8", "replace")
+                log(f"【sign id={cid}】{sb[:300]}")
+            except Exception as ex:
+                log(f"【sign id={cid}】失败：{ex}")
         # 签到二维码落地页（侦察其控制器模块，不改变状态）
         _today0 = now_bj().strftime("%Y-%m-%d")
         _rid0 = next((str(r.get("id")) for r in (rl or [])
