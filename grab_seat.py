@@ -302,6 +302,11 @@ def load_config():
             f"CHAOXING_USERNAME_{idx}", cfg.get(f"username_{idx}", ""))
         cfg["password"] = os.environ.get(
             f"CHAOXING_PASSWORD_{idx}", cfg.get(f"password_{idx}", ""))
+        # 兜底：工作流矩阵也可能用通用变量名传入该账号凭据
+        if not cfg["username"]:
+            cfg["username"] = os.environ.get("CHAOXING_USERNAME", "")
+        if not cfg["password"]:
+            cfg["password"] = os.environ.get("CHAOXING_PASSWORD", "")
     # 该账号负责的座位号（云端由矩阵任务指定）
     cfg["seat_num"] = os.environ.get("SEAT_NUM", cfg["seat_num"])
     cfg["serverchan_key"] = os.environ.get("SERVERCHAN_KEY", cfg["serverchan_key"])
@@ -344,6 +349,18 @@ def run(cfg, mode):
         for name, val in info["hidden_inputs"]:
             log(f"  {name} = {val[:60]}")
         log(f"完整页面已保存：{page_path}")
+        # 同时回报“我的预约”真实状态（云端排障用）：带过滤与不带过滤两种
+        hdr = dict(grabber.base_headers, Referer="https://office.chaoxing.com/")
+        for tag2, u in (
+            ("全部预约", grabber.RESERVELIST_API),
+            ("未过滤", "https://office.chaoxing.com/data/apps/seat/reservelist?"
+                       "indexId=0&pageSize=100"),
+        ):
+            try:
+                rr = grabber.session.get(u, headers=hdr, timeout=15)
+                log(f"【{tag2}】{rr.content.decode('utf-8','replace')[:1500]}")
+            except Exception as ex:
+                log(f"【{tag2}】查询失败：{ex}")
         return
 
     # 预约日期：北京时间明天（day_offset 可配置）

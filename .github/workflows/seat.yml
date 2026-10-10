@@ -68,6 +68,8 @@ jobs:
           SEAT_NUM: ${{ matrix.acc.seat }}
           CHAOXING_USERNAME: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_USERNAME || secrets.CHAOXING_USERNAME_2 }}
           CHAOXING_PASSWORD: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_PASSWORD || secrets.CHAOXING_PASSWORD_2 }}
+          CHAOXING_USERNAME_2: ${{ secrets.CHAOXING_USERNAME_2 }}
+          CHAOXING_PASSWORD_2: ${{ secrets.CHAOXING_PASSWORD_2 }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py ${{ github.event.inputs.mode || 'run' }}
 
@@ -119,5 +121,7 @@ jobs:
           SEAT_NUM: ${{ matrix.acc.seat }}
           CHAOXING_USERNAME: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_USERNAME || secrets.CHAOXING_USERNAME_2 }}
           CHAOXING_PASSWORD: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_PASSWORD || secrets.CHAOXING_PASSWORD_2 }}
+          CHAOXING_USERNAME_2: ${{ secrets.CHAOXING_USERNAME_2 }}
+          CHAOXING_PASSWORD_2: ${{ secrets.CHAOXING_PASSWORD_2 }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py "$ACTION"
