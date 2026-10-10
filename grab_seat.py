@@ -354,7 +354,7 @@ def run(cfg, mode):
         for p in ("myReserve", "mine", "my", "myreserve", "myReservations"):
             u = f"https://office.chaoxing.com/front/apps/seat/{p}"
             try:
-                rr = grabber.session.get(u, headers=hdr0 := dict(
+                rr = grabber.session.get(u, headers=dict(
                     grabber.base_headers,
                     Referer="https://office.chaoxing.com/"), timeout=10)
                 body = rr.content.decode("utf-8", "replace")
