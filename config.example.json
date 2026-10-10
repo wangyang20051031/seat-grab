@@ -15,7 +15,7 @@
     "token_refresh_every": 20,
     "sign_window_min": 30,
     "signback_before_min": 5,
-    "signback_after_min": 8,
+    "signback_after_min": 18,
     "sign_retry_interval": [8, 15],
     "sign_late_window_min": 10,
     "serverchan_key": "",
