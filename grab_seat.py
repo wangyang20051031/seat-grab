@@ -802,13 +802,13 @@ def run_sign(cfg, action):
     attempted = False   # 本任务是否实际发起过签退请求（区分“我签退的”与“别的班次签的”）
     while now_bj() < close_at:
         curs = cur_records()
-        if curs:
-            seen = True
         # 只签“今日结束时间最晚的活跃记录”（真正的当前/末时段）。
         # 终态 2/7/8 排除；分时段模式下前两时段即使状态异常滞留为 1，
         # 也不会被误签——它们 endTime 较小。
         active = [r for r in curs if r.get("status") not in (2, 7, 8)]
         if active:
+            # 只有真出现过“需要动作”的记录，才允许后续预警/失败告警
+            seen = True
             r = max(active, key=lambda x: int(x["endTime"]))
             st = r.get("status")
             rid = r["id"]
@@ -858,7 +858,9 @@ def run_sign(cfg, action):
             log("暂无活跃记录，窗口内继续轮询...")
         # 提前预警：到 22:05（结束+5分钟）仍未确认签退，立刻通知人工介入，
         # 同时继续重试，不等窗口耗尽（22:18 后无法手动补救）
-        if not warned and now_bj() >= end + dt.timedelta(minutes=5):
+        # 必须见过真实预约记录（seen）才允许预警——否则当天本来就没预约
+        # （如新账号首日/手动取消全天），每个冗余班次都会发一条假预警。
+        if seen and not warned and now_bj() >= end + dt.timedelta(minutes=5):
             warned = True
             push_wechat(key, f"⚠️座位{seat}自动签退暂未确认，请准备手动！",
                         f"当前时间：{now_bj():%H:%M:%S}\n最后返回：{fail_msg}\n\n"
