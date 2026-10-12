@@ -55,6 +55,7 @@ jobs:
         acc:
           - { idx: '1', seat: '263' }
           - { idx: '2', seat: '258' }
+          - { idx: '3', seat: '264' }
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -73,10 +74,12 @@ jobs:
         env:
           ACCOUNT_IDX: ${{ matrix.acc.idx }}
           SEAT_NUM: ${{ matrix.acc.seat }}
-          CHAOXING_USERNAME: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_USERNAME || secrets.CHAOXING_USERNAME_2 }}
-          CHAOXING_PASSWORD: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_PASSWORD || secrets.CHAOXING_PASSWORD_2 }}
+          CHAOXING_USERNAME: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_USERNAME || (matrix.acc.idx == '2' && secrets.CHAOXING_USERNAME_2 || secrets.CHAOXING_USERNAME_3) }}
+          CHAOXING_PASSWORD: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_PASSWORD || (matrix.acc.idx == '2' && secrets.CHAOXING_PASSWORD_2 || secrets.CHAOXING_PASSWORD_3) }}
           CHAOXING_USERNAME_2: ${{ secrets.CHAOXING_USERNAME_2 }}
           CHAOXING_PASSWORD_2: ${{ secrets.CHAOXING_PASSWORD_2 }}
+          CHAOXING_USERNAME_3: ${{ secrets.CHAOXING_USERNAME_3 }}
+          CHAOXING_PASSWORD_3: ${{ secrets.CHAOXING_PASSWORD_3 }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py ${{ github.event.inputs.mode || 'run' }}
 
@@ -96,6 +99,7 @@ jobs:
         acc:
           - { idx: '1', seat: '263' }
           - { idx: '2', seat: '258' }
+          - { idx: '3', seat: '264' }
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -128,9 +132,11 @@ jobs:
           ACTION: ${{ env.ACTION }}
           ACCOUNT_IDX: ${{ matrix.acc.idx }}
           SEAT_NUM: ${{ matrix.acc.seat }}
-          CHAOXING_USERNAME: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_USERNAME || secrets.CHAOXING_USERNAME_2 }}
-          CHAOXING_PASSWORD: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_PASSWORD || secrets.CHAOXING_PASSWORD_2 }}
+          CHAOXING_USERNAME: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_USERNAME || (matrix.acc.idx == '2' && secrets.CHAOXING_USERNAME_2 || secrets.CHAOXING_USERNAME_3) }}
+          CHAOXING_PASSWORD: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_PASSWORD || (matrix.acc.idx == '2' && secrets.CHAOXING_PASSWORD_2 || secrets.CHAOXING_PASSWORD_3) }}
           CHAOXING_USERNAME_2: ${{ secrets.CHAOXING_USERNAME_2 }}
           CHAOXING_PASSWORD_2: ${{ secrets.CHAOXING_PASSWORD_2 }}
+          CHAOXING_USERNAME_3: ${{ secrets.CHAOXING_USERNAME_3 }}
+          CHAOXING_PASSWORD_3: ${{ secrets.CHAOXING_PASSWORD_3 }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py "$ACTION"

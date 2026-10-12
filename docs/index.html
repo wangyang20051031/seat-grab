@@ -52,7 +52,7 @@
 </head>
 <body>
   <h1>📚 图书馆座位</h1>
-  <div class="sub">不用扫码 · 一键处理两个座位（263 / 258）<br>点一下，云端立刻执行，结果微信推给你</div>
+  <div class="sub">不用扫码 · 一键处理三个座位（263 / 258 / 264）<br>点一下，云端立刻执行，结果微信推给你</div>
 
   <div class="stage">
     <button class="btn btn-in"  id="btnIn"  onclick="fire('signin')">
@@ -123,7 +123,7 @@
         }
       );
       if(resp.status===204){
-        setStatus(`✅ <b>${word}任务已触发！</b><br>云端正在处理 263/258 两个座位，约 1 分钟内留意微信“${word}成功”推送。`, "ok");
+        setStatus(`✅ <b>${word}任务已触发！</b><br>云端正在处理 263/258/264 三个座位，约 1 分钟内留意微信“${word}成功”推送。`, "ok");
       } else if(resp.status===401){
         setStatus("❌ 令牌无效或已过期，请点底部“设置令牌”更新。", "err");
       } else {

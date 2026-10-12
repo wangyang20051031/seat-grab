@@ -3,8 +3,13 @@
     "password": "",
     "username_2": "",
     "password_2": "",
+    "username_3": "",
+    "password_3": "",
     "room_id": "6287",
     "seat_num": "263",
+    "seat_1": "263",
+    "seat_2": "258",
+    "seat_3": "264",
     "day_offset": 1,
     "segments": [
         ["07:00", "12:00"],

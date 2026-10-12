@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 一键签到 / 一键签退 —— 不用扫码、不用翻学习通。
-双击 一键签到.bat / 一键签退.bat 即可，自动处理两个账号（263 / 258），
+双击 一键签到.bat / 一键签退.bat 即可，自动处理三个账号（263 / 258 / 264），
 结束后弹窗 + 微信显示结果。复用 grab_seat.py 已验证的登录与签到逻辑。
 """
 import sys
@@ -126,7 +126,8 @@ def main():
 
     key = base_cfg.get("serverchan_key", "")
     accounts = [(1, base_cfg.get("seat_1", 263)),
-                (2, base_cfg.get("seat_2", 258))]
+                (2, base_cfg.get("seat_2", 258)),
+                (3, base_cfg.get("seat_3", 264))]
 
     results = []
     for idx, seat in accounts:
