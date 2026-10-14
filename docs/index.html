@@ -28,6 +28,9 @@
   .btn:disabled { opacity:.55; filter:grayscale(.3); cursor:not-allowed; }
   .btn-in  { background:linear-gradient(135deg,#16a34a,#15803d); }
   .btn-back{ background:linear-gradient(135deg,#ea580c,#c2410c); }
+  .btn-enter{ background:linear-gradient(135deg,#2563eb,#4f46e5); }
+  .btn small { font-size:12px; font-weight:400; opacity:.85; letter-spacing:0; margin-left:2px; }
+  .hint { font-size:12px; opacity:.7; text-align:center; line-height:1.6; margin:-6px 2px -4px; }
   .ico { font-size:26px; }
   .status {
     margin-top:26px; width:100%; max-width:420px; min-height:54px; border-radius:14px;
@@ -60,6 +63,10 @@
     </button>
     <button class="btn btn-back" id="btnBack" onclick="fire('signback')">
       <span class="ico">🔚</span>一键签退
+    </button>
+    <div class="hint">中午回馆被门禁拦下时用：自动退掉学习中的旧座，秒约当前半点场（保持待履约，<b>不自动签到</b>）。仅 263 座 / 账号1。</div>
+    <button class="btn btn-enter" id="btnEnter" onclick="fireEnter()">
+      <span class="ico">🚪</span>进馆模式<small>仅263</small>
     </button>
   </div>
 
@@ -101,27 +108,36 @@
     s.innerHTML = msg;
   }
 
-  async function fire(mode){
-    const token = (localStorage.getItem("gh_token")||"").trim();
-    if(!token){ openSetup(); return; }
+  function lockButtons(on){
+    ["btnIn","btnBack","btnEnter"].forEach(id => { $(id).disabled = on; });
+  }
 
+  async function dispatch(mode){
+    const token = (localStorage.getItem("gh_token")||"").trim();
+    if(!token){ openSetup(); return 401; }
+    const resp = await fetch(
+      `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${WF}/dispatches`,
+      {
+        method:"POST",
+        headers:{
+          "Authorization":"Bearer "+token,
+          "Accept":"application/vnd.github+json",
+          "Content-Type":"application/json"
+        },
+        body: JSON.stringify({ ref:"main", inputs:{ mode:mode } })
+      }
+    );
+    return resp;
+  }
+
+  async function fire(mode){
     const word = mode==="signin" ? "签到" : "签退";
-    $("btnIn").disabled = true; $("btnBack").disabled = true;
+    lockButtons(true);
     setStatus(`⏳ 正在触发云端<b>${word}</b>，请稍候...`);
 
     try {
-      const resp = await fetch(
-        `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${WF}/dispatches`,
-        {
-          method:"POST",
-          headers:{
-            "Authorization":"Bearer "+token,
-            "Accept":"application/vnd.github+json",
-            "Content-Type":"application/json"
-          },
-          body: JSON.stringify({ ref:"main", inputs:{ mode:mode } })
-        }
-      );
+      const resp = await dispatch(mode);
+      if(resp === 401) return;
       if(resp.status===204){
         setStatus(`✅ <b>${word}任务已触发！</b><br>云端正在处理 263/258/264 三个座位，约 1 分钟内留意微信“${word}成功”推送。`, "ok");
       } else if(resp.status===401){
@@ -133,7 +149,28 @@
     } catch(e){
       setStatus("❌ 网络错误："+e+"<br>请检查手机网络后重试。", "err");
     } finally {
-      $("btnIn").disabled = false; $("btnBack").disabled = false;
+      lockButtons(false);
+    }
+  }
+
+  async function fireEnter(){
+    lockButtons(true);
+    setStatus("⏳ 正在执行<b>进馆模式</b>：云端退旧座 → 秒约当前半点场，约需 10～40 秒，请勿重复点击...");
+    try {
+      const resp = await dispatch("enter");
+      if(resp === 401) return;
+      if(resp.status===204){
+        setStatus(`✅ <b>进馆模式已触发（263座）！</b><br>请留意微信“🚪进馆模式就绪”推送；<b>收到后立刻刷脸进门</b>，进门走到座位再点上面“一键签到”。<br>若收到“未完成”推送，按提示手动退座重约。`, "ok");
+      } else if(resp.status===401){
+        setStatus("❌ 令牌无效或已过期，请点底部“设置令牌”更新。", "err");
+      } else {
+        const t = await resp.text();
+        setStatus(`❌ 触发失败（HTTP ${resp.status}）：<br>${t.slice(0,300)}`, "err");
+      }
+    } catch(e){
+      setStatus("❌ 网络错误："+e+"<br>请检查手机网络后重试。", "err");
+    } finally {
+      lockButtons(false);
     }
   }
 

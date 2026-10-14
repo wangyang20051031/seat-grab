@@ -74,6 +74,7 @@ class SeatGrabber:
     INDEX_API = "https://office.chaoxing.com/data/apps/seat/index"
     SIGN_API = "https://office.chaoxing.com/data/apps/seat/sign"
     SIGNBACK_API = "https://office.chaoxing.com/data/apps/seat/signback"
+    CANCEL_API = "https://office.chaoxing.com/data/apps/seat/cancel"
 
     # 旧版页面可能使用的固定盐（作为兜底）
     LEGACY_SALT = "%sd`~7^/>N4!Q#){''"
@@ -565,6 +566,232 @@ def run(cfg, mode):
     if cfg.get("popup"):
         show_popup("抢座结果", "\n".join(lines))
 
+# ---------------- 进馆模式 ----------------
+
+def run_enter(cfg):
+    """门禁新政（学习中不可刷脸入馆）专用流程：
+    退掉当前活跃预约（学习中/暂离/被监督 -> 退座；未来时段待履约 -> 取消），
+    随后立即预约“当前半点场 ~ 闭馆”，完成后保持【待履约】不签到，
+    用户刷脸进门后再自行签到。当前仅用于账号1 / 263 座。"""
+    grabber = SeatGrabber(cfg)
+    grabber.login()
+
+    key = cfg.get("serverchan_key")
+    seat = str(cfg["seat_num"])
+    today_s = now_bj().strftime("%Y-%m-%d")
+    ACTIVE = (0, 1, 3, 5)
+    RELEASED = (2, 7, 8)          # 已履约 / 已取消 / 失效
+
+    def finish_ok(title, content):
+        log("===== 进馆模式完成 =====")
+        for line in content.split("\n"):
+            if line.strip():
+                log(line)
+        push_wechat(key, title, content)
+        if cfg.get("popup"):
+            show_popup(title, content)
+
+    def finish_fail(reason):
+        title = f"⚠️进馆模式未完成（{seat}座）"
+        content = (f"座位：{seat}\n原因：{reason}\n\n"
+                   "请手动操作：我的预约→退座，随后立即重约当前半点场，"
+                   "显示“待履约”后刷脸进门。")
+        log(title + " " + reason)
+        push_wechat(key, title, content)
+        if cfg.get("popup"):
+            show_popup(title, content)
+
+    def gather_today():
+        """聚合 seat/index 与 reservelist 的今日记录，按 id 去重"""
+        merged = {}
+
+        def add(r):
+            try:
+                rid = str(r.get("id"))
+                if rid and str(r.get("today")) == today_s:
+                    merged[rid] = r
+            except Exception:
+                pass
+
+        try:
+            data = (grabber.fetch_index() or {}).get("data") or {}
+            for bucket in ("curReserves", "nearReserves"):
+                for r in data.get(bucket) or []:
+                    add(r)
+        except Exception as e:
+            log(f"index 查询失败：{e}")
+        try:
+            rl, _ = grabber.fetch_reservations()
+            for r in rl or []:
+                add(r)
+        except Exception as e:
+            log(f"reservelist 查询失败：{e}")
+        return list(merged.values())
+
+    def wait_status(rid, want, timeout=30):
+        """轮询直到指定记录进入目标状态集合"""
+        deadline = now_bj() + dt.timedelta(seconds=timeout)
+        while now_bj() < deadline:
+            try:
+                rl, _ = grabber.fetch_reservations()
+                for r in rl or []:
+                    if (str(r.get("id")) == str(rid)
+                            and r.get("status") in want):
+                        return True
+            except Exception:
+                pass
+            time.sleep(1.5)
+        return False
+
+    log("===== 进馆模式：退旧座 → 秒约当前半点场（不签到）=====")
+
+    # 1. 定位当前需要释放的活跃记录（本座位优先，取结束时间最晚的一条）
+    actives = [r for r in gather_today() if r.get("status") in ACTIVE]
+    own = [r for r in actives if str(r.get("seatNum")) == seat]
+    actives = own or actives
+    actives.sort(key=lambda r: int(r.get("endTime") or 0), reverse=True)
+    cur = actives[0] if actives else None
+
+    released_already = False
+    if cur is None:
+        log("当前无活跃预约，直接预约当前场")
+    else:
+        cid = cur["id"]
+        st = cur.get("status")
+        s_hm = ts_to_bj(cur["startTime"]).strftime("%H:%M")
+        e_hm = ts_to_bj(cur["endTime"]).strftime("%H:%M")
+        log(f"当前记录 id={cid} {s_hm}-{e_hm} "
+            f"状态={RESERVE_STATUS.get(st, st)}")
+
+        if st == 0:
+            start_dt = ts_to_bj(cur["startTime"])
+            # 待履约且已进入可入场时段（开始前20分钟起）：正是刷脸所需状态
+            if start_dt - dt.timedelta(minutes=20) <= now_bj():
+                title = f"🚪进馆模式就绪：{seat}座 {s_hm}-{e_hm} 待履约"
+                content = ("当前预约已是“待履约”状态，无需退座重约。\n"
+                           "请直接刷脸进馆，进门后到座位点“一键签到”"
+                           "（开始后20分钟内）。")
+                finish_ok(title, content)
+                return
+            # 待履约但属于未来时段：先取消，才能改约当前场
+            log("现有待履约为未来时段，先取消…")
+            try:
+                cres = grabber.sign_action(grabber.CANCEL_API, cid)
+            except requests.RequestException as e:
+                finish_fail(f"取消请求网络异常：{e}")
+                return
+            ckind, cmsg = classify(cres)
+            log(f"取消返回：{ckind} {cmsg}")
+            if not wait_status(cid, (7, 8, 2), timeout=20):
+                finish_fail(f"未来场取消未确认：{cmsg}")
+                return
+        else:
+            # 学习中(1)/暂离中(3)/被监督中(5) → 退座（signback）
+            try:
+                sres = grabber.sign_action(grabber.SIGNBACK_API, cid)
+            except requests.RequestException as e:
+                finish_fail(f"退座请求网络异常：{e}")
+                return
+            skind, smsg = classify_sign(sres, "signback")
+            log(f"退座返回：{skind} {smsg}")
+            if skind not in ("ok", "already", "auth"):
+                finish_fail(f"退座失败：{smsg}")
+                return
+            if skind == "auth":
+                grabber.login()
+                try:
+                    sres = grabber.sign_action(grabber.SIGNBACK_API, cid)
+                except requests.RequestException as e:
+                    finish_fail(f"退座重试网络异常：{e}")
+                    return
+                skind, smsg = classify_sign(sres, "signback")
+                if skind not in ("ok", "already"):
+                    finish_fail(f"退座失败：{smsg}")
+                    return
+            if not wait_status(cid, RELEASED, timeout=30):
+                finish_fail("退座后30秒内未确认状态，为避免误约已停止")
+                return
+            released_already = True
+            log("旧座已释放（已履约），立刻重约…")
+            time.sleep(1.0)
+
+    # 2. 计算“当前半点场”：刚过去的半点若已超过20分钟，则约下一个半点
+    now = now_bj()
+    start_dt = now.replace(minute=30 if now.minute >= 30 else 0,
+                           second=0, microsecond=0)
+    if (now - start_dt).total_seconds() > 20 * 60:
+        start_dt += dt.timedelta(minutes=30)
+    open_s, close_s = cfg["segments"][0][0], cfg["segments"][-1][1]
+    opening = now.replace(
+        hour=int(open_s[:2]), minute=int(open_s[3:5]), second=0, microsecond=0)
+    closing = now.replace(
+        hour=int(close_s[:2]), minute=int(close_s[3:5]), second=0, microsecond=0)
+    if start_dt < opening:
+        start_dt = opening
+    if start_dt >= closing:
+        finish_fail(f"已过或接近闭馆（{close_s}），无法再约当天场次")
+        return
+    start_s = start_dt.strftime("%H:%M")
+
+    # 3. 刷新盐值并提交（盐一次性，每次尝试都刷新；最多约60秒）
+    last_msg = "未知"
+    booked = False
+    for attempt in range(1, 13):
+        tok = grabber.refresh_token()
+        if not tok[0]:
+            time.sleep(1.2)
+            continue
+        try:
+            result = grabber.submit_segment(start_s, close_s, today_s)
+        except requests.RequestException as e:
+            last_msg = f"网络异常：{e}"
+            log(f"第{attempt}次提交网络异常，重试")
+            time.sleep(2)
+            continue
+        kind, msg = classify(result)
+        last_msg = msg
+        if kind in ("success", "dup"):
+            booked = True
+            log(f"✅ {start_s}-{close_s} 预约完成（{kind}）：{msg}")
+            break
+        if kind == "auth":
+            log("登录态失效，重新登录…")
+            grabber.login()
+        else:
+            log(f"第{attempt}次预约未成功（{kind}）：{msg}")
+        time.sleep(2)
+
+    if not booked:
+        finish_fail(f"重约 {start_s}-{close_s} 未成功：{last_msg}")
+        return
+
+    # 4. 确认新场为待履约（dup 情况下也要核实确有此记录）
+    ready = None
+    deadline = now_bj() + dt.timedelta(seconds=15)
+    while now_bj() < deadline:
+        for r in gather_today():
+            if (str(r.get("seatNum")) == seat and r.get("status") == 0
+                    and ts_to_bj(r["startTime"]).strftime("%H:%M") == start_s):
+                ready = r
+                break
+        if ready:
+            break
+        time.sleep(1.5)
+
+    if not ready:
+        finish_fail(f"预约已提交但未查到 {start_s} 的待履约记录，请打开"
+                    "“我的预约”人工确认")
+        return
+
+    title = f"🚪进馆模式就绪：{seat}座 {start_s}-{close_s} 待履约"
+    lines = [f"座位：{seat}", f"新场：{start_s}-{close_s}（待履约）", ""]
+    if released_already:
+        lines.append("旧座已退、新场已约。")
+    lines += ["请【立刻刷脸进馆】。",
+              "进门后到座位点“一键签到”（开场后20分钟内必须签上）。",
+              "今晚自动签退照常，无需其他操作。"]
+    finish_ok(title, "\n".join(lines))
+
 def sleep_until(target_dt):
     """低频睡到指定北京时间"""
     while True:
@@ -880,12 +1107,15 @@ def run_sign(cfg, action):
 def main():
     parser = argparse.ArgumentParser(description="图书馆座位自动抢座")
     parser.add_argument("mode", nargs="?",
-                        choices=["inspect", "dryrun", "run", "signin", "signback"],
+                        choices=["inspect", "dryrun", "run", "signin",
+                                 "signback", "enter"],
                         default=os.environ.get("GRAB_MODE", "run"))
     args = parser.parse_args()
     cfg = load_config()
     if args.mode in ("signin", "signback"):
         run_sign(cfg, args.mode)
+    elif args.mode == "enter":
+        run_enter(cfg)
     else:
         run(cfg, args.mode)
 

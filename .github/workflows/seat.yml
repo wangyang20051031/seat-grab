@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '运行模式（run=抢座 inspect=只测登录 signin=手动测签到 signback=手动测签退）'
+        description: '运行模式（run=抢座 inspect=只测登录 signin=手动测签到 signback=手动测签退 enter=进馆模式仅263）'
         type: choice
         default: run
         options:
@@ -37,6 +37,7 @@ on:
           - inspect
           - signin
           - signback
+          - enter
 
 # 不使用 concurrency 限制：定时任务并行作为冗余；重复操作由脚本识别状态后静默跳过。
 
@@ -142,3 +143,31 @@ jobs:
           CHAOXING_PASSWORD_3: ${{ secrets.CHAOXING_PASSWORD_3 }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py "$ACTION"
+
+  # 进馆模式：仅账号1 / 263 座。门禁新政（学习中不可刷脸入馆）专用：
+  # 自动退旧座 → 秒约当前半点场~22:00，保持待履约（不签到），人刷脸进门后再签到
+  enter:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'enter'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install requests cryptography
+
+      - name: 执行进馆模式（账号1 / 263座）
+        env:
+          ACCOUNT_IDX: '1'
+          SEAT_NUM: '263'
+          CHAOXING_USERNAME: ${{ secrets.CHAOXING_USERNAME }}
+          CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python grab_seat.py enter
+
