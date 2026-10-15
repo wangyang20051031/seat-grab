@@ -608,14 +608,28 @@ def run_enter(cfg):
             show_popup(title, content)
 
     def gather_today():
-        """聚合 seat/index 与 reservelist 的今日本座位记录，按 id 去重"""
+        """聚合 seat/index 与 reservelist 的今日本座位记录，按 id 去重。
+        实测两来源都可能缺字段甚至整接口返回空（2026-10-15 实测
+        reservelist 为空、仅 index 有记录），故日期/座位过滤都要容错。"""
         merged = {}
+        today_date = now_bj().date()
 
         def add(r):
             try:
-                rid = str(r.get("id"))
-                if (rid and str(r.get("today")) == today_s
-                        and str(r.get("seatNum")) == seat):
+                rid = str(r.get("id") or "")
+                if not rid:
+                    return
+                day_ok = str(r.get("today")) == today_s
+                if not day_ok:
+                    try:
+                        day_ok = ts_to_bj(r["startTime"]).date() == today_date
+                    except Exception:
+                        day_ok = False
+                if not day_ok:
+                    return
+                # enter 单账号运行；记录缺 seatNum 时（部分接口不带）视为本账号
+                sn = r.get("seatNum")
+                if sn is None or str(sn) == seat:
                     merged[rid] = r
             except Exception:
                 pass
@@ -636,17 +650,14 @@ def run_enter(cfg):
         return list(merged.values())
 
     def wait_released(rid, timeout=30):
-        """轮询直到指定记录进入已释放状态集合"""
+        """轮询直到指定记录进入已释放状态。两来源都查——实测 reservelist
+        可能整体为空，只能靠 seat.index 的 nearReserves 确认状态。"""
         deadline = now_bj() + dt.timedelta(seconds=timeout)
         while now_bj() < deadline:
-            try:
-                rl, _ = grabber.fetch_reservations()
-                for r in rl or []:
-                    if (str(r.get("id")) == str(rid)
-                            and r.get("status") in RELEASED):
-                        return True
-            except Exception:
-                pass
+            for r in gather_today():
+                if (str(r.get("id")) == str(rid)
+                        and r.get("status") in RELEASED):
+                    return True
             time.sleep(1.5)
         return False
 
