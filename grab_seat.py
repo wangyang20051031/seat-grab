@@ -776,7 +776,14 @@ def run_enter(cfg):
         last_msg = msg
         if kind == "success":
             booked = True
-            log(f"✅ {start_s}-{end_s} 预约完成：{msg}")
+            log(f"✅ {start_s}-{end_s} 预约完成：{msg or '（服务端返回成功）'}")
+            # 记录成功响应中可能携带的新记录 id，供回查精确定位
+            try:
+                d = result.get("data")
+                if isinstance(d, dict):
+                    log(f"成功响应 data：{d}")
+            except Exception:
+                pass
             break
         if kind == "auth":
             log("登录态失效，重新登录…")
@@ -790,23 +797,42 @@ def run_enter(cfg):
                     f"已退座 {signed_back} 条，请立刻手动补约当前时段")
         return
 
-    # 6. 确认新场为待履约（起止时间都要对上）
+    # 6. 确认新场为待履约（起止时间都要对上）。
+    # 实测服务端列表传播延迟可达 16~60 秒（2026-10-15 两次复现：接口成功后
+    # 15 秒内 curReserves 查无记录，69 秒后可见），窗口给到 60 秒。
     ready = None
-    deadline = now_bj() + dt.timedelta(seconds=15)
+    became_learning = None
+    deadline = now_bj() + dt.timedelta(seconds=60)
     while now_bj() < deadline:
         for r in gather_today():
-            if (r.get("status") == 0
-                    and hm(r["startTime"]) == start_s
-                    and hm(r["endTime"]) == end_s):
-                ready = r
+            if hm(r["startTime"]) == start_s and hm(r["endTime"]) == end_s:
+                if r.get("status") == 0:
+                    ready = r
+                elif r.get("status") in (1, 3, 5):
+                    became_learning = r
                 break
-        if ready:
+        if ready or became_learning:
             break
-        time.sleep(1.5)
+        time.sleep(2)
+
+    if became_learning and not ready:
+        # 同起止新场已变成学习中（期间被手动/其他任务签到）：刷脸仍会被拦
+        finish_fail(f"新场 {start_s}-{end_s} 已是学习中（疑似刚被签到），"
+                    f"刷脸仍会被拦。如确实要进门，请再点一次进馆模式；"
+                    f"若已在馆内则无需操作。", f"已退座 {signed_back} 条")
+        return
 
     if not ready:
-        finish_fail(f"预约已提交但未查到 {start_s}-{end_s} 的待履约记录，"
-                    f"请打开“我的预约”人工确认", f"已退座 {signed_back} 条")
+        # 接口明确返回 success，仅列表暂未刷新：按成功告知，避免用户重复点击
+        # 把已签到的场连锁退掉（2026-10-15 事故链）
+        title = f"🚪进馆模式已提交：{seat}座 {start_s}-{end_s}"
+        lines = [f"座位：{seat}", f"新场：{start_s}-{end_s}",
+                 "预约接口已返回成功，但列表刷新有延迟（约1分钟），暂未查到记录。",
+                 "", "请打开学习通“我的预约”确认该场显示“待履约”：",
+                 "· 若有待履约场 → 直接刷脸进门，进门后签到；",
+                 "· 若没有 → 手动约当前半点场。",
+                 "**不要立刻反复点进馆模式**，以免重复退座。"]
+        finish_ok(title, "\n".join(lines))
         return
 
     title = f"🚪进馆模式就绪：{seat}座 {start_s}-{end_s} 待履约"
