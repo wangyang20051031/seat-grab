@@ -736,7 +736,8 @@ def run_enter(cfg):
                            second=0, microsecond=0)
     if (now - start_dt).total_seconds() > 20 * 60:
         start_dt += dt.timedelta(minutes=30)
-    open_s, close_s = cfg["segments"][0][0], cfg["segments"][-1][1]
+    open_s = cfg["segments"][0][0]
+    close_s = cfg.get("daily_close", cfg["segments"][-1][1])
     opening = now.replace(
         hour=int(open_s[:2]), minute=int(open_s[3:5]), second=0, microsecond=0)
     closing = now.replace(
@@ -753,9 +754,16 @@ def run_enter(cfg):
     future_starts = [ts_to_bj(r["startTime"]) for r in pendings
                      if ts_to_bj(r["startTime"]) > start_dt]
     end_dt = min(future_starts + [closing]) if future_starts else closing
+    # 馆方新规单次预约≤4小时（reserveDuration=4.0）：超出截断，之后由续约任务自动延长
+    cap_end = start_dt + dt.timedelta(hours=4)
+    capped = False
+    if end_dt > cap_end:
+        end_dt = cap_end
+        capped = True
     end_s = end_dt.strftime("%H:%M")
     log(f"计划新场：{start_s}-{end_s}"
-        + ("（与后续待履约相邻）" if future_starts else "（约到闭馆）"))
+        + ("（与后续待履约相邻）" if future_starts and not capped
+           else "（单条≤4h截断，稍后自动续约）" if capped else "（约到闭馆）"))
 
     # 5. 刷新盐值并提交（盐一次性，每次尝试都刷新；只认 success）
     last_msg = "未知"
@@ -845,6 +853,218 @@ def run_enter(cfg):
               "进门后到座位点“一键签到”（开场后20分钟内必须签上）。",
               "今晚自动签退照常，无需其他操作。"]
     finish_ok(title, "\n".join(lines))
+
+# ---------------- 续约流程（馆方新规：单条≤4h、每日仅1条）----------------
+# 服务端“隐式续约”（2026-10-16 实测确认）：对学习中记录提交
+# “起点 = 当前 endTime”的紧邻时段，同一条 seatReserve 的 endTime 被直接
+# 延长（当天 08:30 的记录一路续成 08:30-22:00，duration=13.5）：
+# 不新增记录、不受单次 4 小时上限、不占用每日 1 条名额。
+# 触发窗口：结束前 renewalDuration=60 分钟内（实测结束前 53 分钟可续）。
+
+RENEW_LEAD_MIN = 60        # 距结束 ≤60 分钟才进入续约窗口
+RENEW_WARN_MIN = 30        # 距结束 ≤30 分钟仍未续成才微信告警（防冗余班刷屏）
+RENEW_STEP = dt.timedelta(hours=4)
+
+
+def run_renew_all(cfg):
+    """续约巡检：一个云端 job 内顺序处理三个账号（省 Actions 分钟）。
+    单个账号异常不影响其余账号。"""
+    base = dict(cfg)
+    accounts = []
+    for idx, seat_key in (("1", "seat_1"), ("2", "seat_2"), ("3", "seat_3")):
+        if idx == "1":
+            u, p = base.get("username"), base.get("password")
+        else:
+            u = os.environ.get(f"CHAOXING_USERNAME_{idx}",
+                               base.get(f"username_{idx}", ""))
+            p = os.environ.get(f"CHAOXING_PASSWORD_{idx}",
+                               base.get(f"password_{idx}", ""))
+        seat = base.get(seat_key) or base.get("seat_num")
+        if u and p and seat:
+            accounts.append((idx, u, p, str(seat)))
+    for idx, u, p, seat in accounts:
+        sub = dict(base)
+        sub["username"], sub["password"], sub["seat_num"] = u, p, seat
+        try:
+            run_renew(sub, idx)
+        except Exception as e:
+            log(f"账号{idx}（{seat}座）续约巡检异常：{e}")
+        time.sleep(1)
+
+
+def run_renew(cfg, idx="?"):
+    """单账号续约：有学习中/暂离记录且距结束 ≤60 分钟时，提交紧邻时段延长。
+    未到窗口 / 无记录 / 已续到闭馆 → 静默（多班冗余靠这个幂等）。"""
+    grabber = SeatGrabber(cfg)
+    grabber.login()
+    grabber.fetch_seat_page()
+
+    seat = str(cfg["seat_num"])
+    key = cfg.get("serverchan_key")
+    tag = f"账号{idx}/{seat}座"
+    today_date = now_bj().date()
+    close_s = cfg.get("daily_close", "22:00")
+    closing = now_bj().replace(
+        hour=int(close_s[:2]), minute=int(close_s[3:5]),
+        second=0, microsecond=0)
+
+    def gather():
+        """聚合 index.curReserves/nearReserves + reservelist 的今日记录。"""
+        merged = {}
+
+        def put(r):
+            try:
+                if ts_to_bj(r["startTime"]).date() == today_date:
+                    merged[str(r.get("id"))] = r
+            except Exception:
+                pass
+
+        try:
+            data = (grabber.fetch_index() or {}).get("data") or {}
+            for bucket in ("curReserves", "nearReserves"):
+                for r in data.get(bucket) or []:
+                    put(r)
+        except Exception:
+            pass
+        try:
+            for r in (grabber.fetch_reservations()[0] or []):
+                put(r)
+        except Exception:
+            pass
+        return list(merged.values())
+
+    def active_record():
+        """取今天结束时间最晚的一条学习中/暂离/被监督记录。"""
+        recs = [r for r in gather() if r.get("status") in (1, 3, 5)]
+        if not recs:
+            return None
+        recs.sort(key=lambda r: int(r["endTime"]))
+        return recs[-1]
+
+    rec = active_record()
+    if rec is None:
+        log(f"{tag} 无学习中/暂离记录，静默跳过")
+        return
+
+    end = ts_to_bj(rec["endTime"])
+    start_s = end.strftime("%H:%M")
+    delta_min = (end - now_bj()).total_seconds() / 60
+    status_s = RESERVE_STATUS.get(rec.get("status"), rec.get("status"))
+    log(f"{tag} 记录 id={rec['id']}（{status_s}）结束 {start_s}，"
+        f"距结束 {delta_min:.0f} 分钟")
+
+    if delta_min < -5:
+        log("记录已过结束时间，跳过")
+        return
+    if end >= closing:
+        log(f"已续到闭馆 {close_s}，无需续约")
+        return
+    if delta_min > RENEW_LEAD_MIN:
+        log("未进入续约窗口（结束前60分钟内才受理），静默跳过")
+        return
+
+    new_end = min(end + RENEW_STEP, closing)
+    end_s = new_end.strftime("%H:%M")
+    day_s = today_date.strftime("%Y-%m-%d")
+    log(f"准备续约：{start_s}-{end_s}（同一条记录延长，不新增预约）")
+
+    def already_extended():
+        """前一个冗余班可能已续成：重新查到的 endTime 已达目标即视为完成。"""
+        cur = active_record()
+        try:
+            return bool(cur) and ts_to_bj(cur["endTime"]) >= \
+                new_end - dt.timedelta(minutes=1)
+        except Exception:
+            return False
+
+    def notify_success():
+        title = f"✅座位{seat}已自动续约至 {end_s}"
+        content = [f"座位：{seat}（{status_s}）",
+                   f"原结束 {start_s} 的预约已【同一条记录】延长到 {end_s}，"
+                   "不占用每天1条名额。",
+                   ""]
+        if new_end < closing:
+            content.append(f"之后约 {end_s} 前一小时会自动再续，直到 {close_s}。")
+        else:
+            content.append(f"今天已覆盖到闭馆 {close_s}，今晚自动签退照常，无需任何操作。")
+        if rec.get("status") == 5:
+            content.append("注意：该记录处于“被监督”状态，续约结果请在学习通内确认。")
+        push_wechat(key, title, "\n".join(content))
+
+    last_msg = "未知"
+    unit_blocked = False
+    for attempt in (1, 2, 3):
+        ok, html, _info = grabber.refresh_token()
+        if not ok:
+            # 账号2 实测被馆方白名单剔除：盐页 500「该应用只允许本单位用户使用」
+            page = html if isinstance(html, str) else ""
+            if "只允许本单位" in page or "logOutShow" in page:
+                unit_blocked = True
+                log("盐页提示“该应用只允许本单位用户使用”——账号被馆方限制，"
+                    "脚本无法续约，跳过（不告警）")
+                return
+            last_msg = "取不到签名盐值"
+            log(f"第{attempt}次取盐失败，重新登录后重试")
+            grabber.login()
+            time.sleep(1.5)
+            continue
+        try:
+            result = grabber.submit_segment(start_s, end_s, day_s)
+        except requests.RequestException as e:
+            last_msg = f"网络异常：{e}"
+            log(f"第{attempt}次提交网络异常，重试")
+            time.sleep(2)
+            continue
+        kind, msg = classify(result)
+        last_msg = msg or kind
+        if kind == "success":
+            # 严格校验：同一记录 id 且 endTime 已延长（响应缺字段时回查列表）
+            rid_same = extended = False
+            d = result.get("data")
+            if isinstance(d, dict):
+                sr = d.get("seatReserve") or {}
+                rid_same = str(sr.get("id")) == str(rec["id"])
+                try:
+                    extended = ts_to_bj(sr["endTime"]) >= \
+                        new_end - dt.timedelta(minutes=1)
+                except Exception:
+                    pass
+            if rid_same and extended:
+                log(f"✅ 续约成功，记录 id={rec['id']} 已延长到 {end_s}")
+                notify_success()
+                return
+            log(f"返回成功，回查列表确认（rid_same={rid_same}）…")
+            time.sleep(3)
+            if already_extended():
+                log(f"✅ 回查确认已延长到 {end_s}")
+                notify_success()
+                return
+            last_msg = "返回成功但未查到延长后的记录"
+        elif kind == "dup":
+            # 冗余班重复提交：若记录已延长则幂等静默（成功通知由先成功的班发过）
+            time.sleep(2)
+            if already_extended():
+                log(f"已由前一冗余班续约到 {end_s}，静默跳过")
+                return
+            last_msg = msg or "返回冲突但记录未延长"
+        elif kind == "auth":
+            log("登录态失效，重新登录…")
+            grabber.login()
+        else:
+            log(f"第{attempt}次续约未成功（{kind}）：{msg}")
+        time.sleep(2)
+
+    log(f"⚠️ {tag} 续约未成功：{last_msg}")
+    # 只剩 ≤30 分钟才告警：前序班次还有补救机会，避免一天多条失败推送
+    if not unit_blocked and \
+            (end - now_bj()).total_seconds() / 60 <= RENEW_WARN_MIN:
+        push_wechat(
+            key, f"⚠️座位{seat}自动续约暂未成功，请留意",
+            f"座位：{seat}（{status_s}）\n当前结束时间：{start_s}\n"
+            f"最后返回：{last_msg}\n\n"
+            "脚本后续巡检仍会重试。若临近结束仍未收到“已自动续约”通知，\n"
+            "请打开学习通→座位预约→我的预约，确认记录结束时间，\n"
+            "必要时手动在座位页续约，以免记录到期释放座位。")
 
 def sleep_until(target_dt):
     """低频睡到指定北京时间"""
@@ -1162,7 +1382,7 @@ def main():
     parser = argparse.ArgumentParser(description="图书馆座位自动抢座")
     parser.add_argument("mode", nargs="?",
                         choices=["inspect", "dryrun", "run", "signin",
-                                 "signback", "enter"],
+                                 "signback", "enter", "renew"],
                         default=os.environ.get("GRAB_MODE", "run"))
     args = parser.parse_args()
     cfg = load_config()
@@ -1170,6 +1390,8 @@ def main():
         run_sign(cfg, args.mode)
     elif args.mode == "enter":
         run_enter(cfg)
+    elif args.mode == "renew":
+        run_renew_all(cfg)
     else:
         run(cfg, args.mode)
 
