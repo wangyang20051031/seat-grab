@@ -2,18 +2,33 @@ name: 图书馆抢座
 
 # 抢座三重冗余（北京时间）：19:52 / 19:57 / 20:02，脚本内部精确等到 20:00:00
 #   （定时任务即使被 GitHub 延迟几分钟，启动后立即提交，不影响结果）
+#   新规：每天只抢 07:00-11:00 一段（单条≤4h、每日仅1条），全天靠续约延长
+# 续约巡检（北京时间）：10:10/10:35、14:10/14:35、15:10/15:35、16:35、17:10、
+#   18:10/18:35，共10班。脚本只在“记录距结束≤60分钟”时真正续约，其余静默；
+#   标准节奏 11:00→15:00→19:00→22:00（结束前约50/25分钟双保险，容忍GitHub延迟），
+#   15-18点的班次覆盖进馆模式中午临时新约的非整点结束。
 # 签到六重冗余（北京时间）：06:35（保险）/ 06:40（主，窗口刚开）/ 06:48 / 06:56 / 07:04 / 07:10
 #   服务端窗口 06:40-07:20；07:10 仍未成功会提前微信预警，留手动补救时间
 # 签退六重冗余（北京时间）：21:48（保险，抵消GitHub启动延迟；脚本内部睡到21:55）/
 #   21:54（主）/ 21:58 / 22:00 / 22:02 / 22:04
 #   服务端窗口 21:55-22:20；22:05 仍未成功会提前微信预警，留手动补救时间
 # 三账号矩阵：账号1 -> 263 座，账号2 -> 258 座，账号3 -> 264 座，各自登录、各自抢座/签到/签退
-# 重复的签到/签退由脚本识别状态后静默跳过；只有真正执行成功的任务才推送微信
+# 重复的签到/签退/续约由脚本识别状态后静默跳过；只有真正执行成功的任务才推送微信
 on:
   schedule:
     - cron: '52 11 * * *'           # 抢座 北京时间 19:52
     - cron: '57 11 * * *'           # 抢座 北京时间 19:57
     - cron: '2 12 * * *'            # 抢座 北京时间 20:02
+    - cron: '10 2 * * *'            # 续约 北京时间 10:10（11:00场结束前50分）
+    - cron: '35 2 * * *'            # 续约 北京时间 10:35（结束前25分，双保险）
+    - cron: '10 6 * * *'            # 续约 北京时间 14:10（15:00场结束前50分）
+    - cron: '35 6 * * *'            # 续约 北京时间 14:35（结束前25分）
+    - cron: '10 7 * * *'            # 续约 北京时间 15:10（进馆临时场/补漏）
+    - cron: '35 7 * * *'            # 续约 北京时间 15:35
+    - cron: '35 8 * * *'            # 续约 北京时间 16:35
+    - cron: '10 9 * * *'            # 续约 北京时间 17:10
+    - cron: '10 10 * * *'           # 续约 北京时间 18:10（19:00场结束前50分）
+    - cron: '35 10 * * *'           # 续约 北京时间 18:35（结束前25分）
     - cron: '35 22 * * *'           # 签到 北京时间 次日 06:35（保险班，抵消GitHub启动延迟；脚本内部睡到06:40）
     - cron: '40 22 * * *'           # 签到 北京时间 次日 06:40（主任务，窗口刚开）
     - cron: '48 22 * * *'           # 签到 北京时间 06:48
@@ -29,7 +44,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '运行模式（run=抢座 inspect=只测登录 signin=手动测签到 signback=手动测签退 enter=进馆模式仅263）'
+        description: '运行模式（run=抢座 inspect=只测登录 signin=手动测签到 signback=手动测签退 enter=进馆模式仅263 renew=续约巡检三账号）'
         type: choice
         default: run
         options:
@@ -38,6 +53,7 @@ on:
           - signin
           - signback
           - enter
+          - renew
 
 # 不使用 concurrency 限制：定时任务并行作为冗余；重复操作由脚本识别状态后静默跳过。
 
@@ -170,4 +186,43 @@ jobs:
           CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py enter
+
+  # 续约巡检：单 job 内顺序跑三个账号（省 Actions 分钟）。脚本自己判断
+  # “距结束≤60分钟”才续约，未到窗口/无记录/已到22:00 全部静默退出，
+  # 故 10 个定时班可安全冗余。账号2 被馆方限制时脚本只记日志不告警。
+  renew:
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.mode == 'renew') ||
+      (github.event_name == 'schedule' &&
+        contains(fromJSON('["10 2 * * *", "35 2 * * *",
+                          "10 6 * * *", "35 6 * * *",
+                          "10 7 * * *", "35 7 * * *",
+                          "35 8 * * *", "10 9 * * *",
+                          "10 10 * * *", "35 10 * * *"]'),
+                 github.event.schedule))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install requests cryptography
+
+      - name: 执行续约巡检（三账号顺序）
+        env:
+          CHAOXING_USERNAME: ${{ secrets.CHAOXING_USERNAME }}
+          CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD }}
+          CHAOXING_USERNAME_2: ${{ secrets.CHAOXING_USERNAME_2 }}
+          CHAOXING_PASSWORD_2: ${{ secrets.CHAOXING_PASSWORD_2 }}
+          CHAOXING_USERNAME_3: ${{ secrets.CHAOXING_USERNAME_3 }}
+          CHAOXING_PASSWORD_3: ${{ secrets.CHAOXING_PASSWORD_3 }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python grab_seat.py renew
 
