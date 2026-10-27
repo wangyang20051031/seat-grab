@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-echo 正在一键签到（263 / 258 两个座位）...
+echo 正在一键签到（263 座 / 账号1）...
 echo.
 
 REM 优先用 python，找不到再试 py 启动器
