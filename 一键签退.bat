@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-echo 正在一键签退（263 / 258 两个座位）...
+echo 正在一键签退（263 座 / 账号1）...
 echo.
 
 where python >nul 2>nul
