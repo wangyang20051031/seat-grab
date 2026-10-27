@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 一键签到 / 一键签退 —— 不用扫码、不用翻学习通。
-双击 一键签到.bat / 一键签退.bat 即可，自动处理三个账号（263 / 258 / 264），
+双击 一键签到.bat / 一键签退.bat 即可，自动处理 263 座（账号1），
 结束后弹窗 + 微信显示结果。复用 grab_seat.py 已验证的登录与签到逻辑。
+多账号扩展点：在 config.json 增加 username_2/password_2/seat_2 等字段即可。
 """
 import sys
 import os
@@ -125,9 +126,18 @@ def main():
         base_cfg = json.load(f)
 
     key = base_cfg.get("serverchan_key", "")
-    accounts = [(1, base_cfg.get("seat_1", 263)),
-                (2, base_cfg.get("seat_2", 258)),
-                (3, base_cfg.get("seat_3", 264))]
+    # 主账号1：必跑
+    accounts = [(1, base_cfg.get("seat_num", base_cfg.get("seat_1", 263)))]
+    # 多账号扩展：若 config.json 含 username_2/password_2/seat_2 等则追加
+    for i in range(2, 10):
+        if base_cfg.get(f"username_{i}") and base_cfg.get(f"password_{i}"):
+            s = base_cfg.get(f"seat_{i}")
+            if s: accounts.append((i, s))
+    # 兜底（旧版三账号硬编码）
+    if len(accounts) == 1 and base_cfg.get("seat_2"):
+        accounts.append((2, base_cfg["seat_2"]))
+    if len(accounts) == 2 and base_cfg.get("seat_3"):
+        accounts.append((3, base_cfg["seat_3"]))
 
     results = []
     for idx, seat in accounts:
