@@ -68,13 +68,6 @@ jobs:
       (github.event_name == 'schedule' &&
         contains(fromJSON('["52 11 * * *", "57 11 * * *", "2 12 * * *"]'),
                  github.event.schedule))
-    strategy:
-      fail-fast: false
-      matrix:
-        acc:
-          - { idx: '1', seat: '263' }
-          - { idx: '2', seat: '258' }
-          - { idx: '3', seat: '264' }
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -91,14 +84,10 @@ jobs:
 
       - name: 执行抢座
         env:
-          ACCOUNT_IDX: ${{ matrix.acc.idx }}
-          SEAT_NUM: ${{ matrix.acc.seat }}
-          CHAOXING_USERNAME: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_USERNAME || (matrix.acc.idx == '2' && secrets.CHAOXING_USERNAME_2 || secrets.CHAOXING_USERNAME_3) }}
-          CHAOXING_PASSWORD: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_PASSWORD || (matrix.acc.idx == '2' && secrets.CHAOXING_PASSWORD_2 || secrets.CHAOXING_PASSWORD_3) }}
-          CHAOXING_USERNAME_2: ${{ secrets.CHAOXING_USERNAME_2 }}
-          CHAOXING_PASSWORD_2: ${{ secrets.CHAOXING_PASSWORD_2 }}
-          CHAOXING_USERNAME_3: ${{ secrets.CHAOXING_USERNAME_3 }}
-          CHAOXING_PASSWORD_3: ${{ secrets.CHAOXING_PASSWORD_3 }}
+          ACCOUNT_IDX: '1'
+          SEAT_NUM: '263'
+          CHAOXING_USERNAME: ${{ secrets.CHAOXING_USERNAME }}
+          CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py ${{ github.event.inputs.mode || 'run' }}
 
@@ -112,13 +101,6 @@ jobs:
                           "48 13 * * *", "54 13 * * *", "58 13 * * *", "0 14 * * *",
                           "2 14 * * *", "4 14 * * *"]'),
                  github.event.schedule))
-    strategy:
-      fail-fast: false
-      matrix:
-        acc:
-          - { idx: '1', seat: '263' }
-          - { idx: '2', seat: '258' }
-          - { idx: '3', seat: '264' }
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -143,20 +125,16 @@ jobs:
               *) ACTION=signback ;;
             esac
           fi
-          echo "本次动作：$ACTION（账号${{ matrix.acc.idx }} / ${{ matrix.acc.seat }}座）"
+          echo "本次动作：$ACTION（账号1 / 263座）"
           echo "ACTION=$ACTION" >> "$GITHUB_ENV"
 
       - name: 执行签到/签退
         env:
           ACTION: ${{ env.ACTION }}
-          ACCOUNT_IDX: ${{ matrix.acc.idx }}
-          SEAT_NUM: ${{ matrix.acc.seat }}
-          CHAOXING_USERNAME: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_USERNAME || (matrix.acc.idx == '2' && secrets.CHAOXING_USERNAME_2 || secrets.CHAOXING_USERNAME_3) }}
-          CHAOXING_PASSWORD: ${{ matrix.acc.idx == '1' && secrets.CHAOXING_PASSWORD || (matrix.acc.idx == '2' && secrets.CHAOXING_PASSWORD_2 || secrets.CHAOXING_PASSWORD_3) }}
-          CHAOXING_USERNAME_2: ${{ secrets.CHAOXING_USERNAME_2 }}
-          CHAOXING_PASSWORD_2: ${{ secrets.CHAOXING_PASSWORD_2 }}
-          CHAOXING_USERNAME_3: ${{ secrets.CHAOXING_USERNAME_3 }}
-          CHAOXING_PASSWORD_3: ${{ secrets.CHAOXING_PASSWORD_3 }}
+          ACCOUNT_IDX: '1'
+          SEAT_NUM: '263'
+          CHAOXING_USERNAME: ${{ secrets.CHAOXING_USERNAME }}
+          CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py "$ACTION"
 
@@ -187,9 +165,8 @@ jobs:
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py enter
 
-  # 续约巡检：单 job 内顺序跑三个账号（省 Actions 分钟）。脚本自己判断
-  # “距结束≤60分钟”才续约，未到窗口/无记录/已到22:00 全部静默退出，
-  # 故 10 个定时班可安全冗余。账号2 被馆方限制时脚本只记日志不告警。
+  # 续约巡检：单账号1续约。脚本自己判断"距结束≤60分钟"才续约，
+  # 未到窗口/无记录/已到22:00 全部静默退出，故 10 个定时班可安全冗余。
   renew:
     if: >-
       (github.event_name == 'workflow_dispatch' &&
@@ -215,14 +192,10 @@ jobs:
       - name: 安装依赖
         run: pip install requests cryptography
 
-      - name: 执行续约巡检（三账号顺序）
+      - name: 执行续约巡检
         env:
           CHAOXING_USERNAME: ${{ secrets.CHAOXING_USERNAME }}
           CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD }}
-          CHAOXING_USERNAME_2: ${{ secrets.CHAOXING_USERNAME_2 }}
-          CHAOXING_PASSWORD_2: ${{ secrets.CHAOXING_PASSWORD_2 }}
-          CHAOXING_USERNAME_3: ${{ secrets.CHAOXING_USERNAME_3 }}
-          CHAOXING_PASSWORD_3: ${{ secrets.CHAOXING_PASSWORD_3 }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python grab_seat.py renew
 
