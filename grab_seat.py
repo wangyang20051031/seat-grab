@@ -306,22 +306,10 @@ def load_config():
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
     # 环境变量覆盖（GitHub Actions 使用，账号密码不写进仓库）
-    # 多账号支持：ACCOUNT_IDX=2 时取第二账号凭据（对应第二个座位）
+    # ACCOUNT_IDX 默认为 1（当前仅单账号1/263座）；多账号扩展点见 run_renew_all
     idx = os.environ.get("ACCOUNT_IDX", "1")
-    if idx == "1":
-        cfg["username"] = os.environ.get("CHAOXING_USERNAME", cfg["username"])
-        cfg["password"] = os.environ.get("CHAOXING_PASSWORD", cfg["password"])
-    else:
-        cfg["username"] = os.environ.get(
-            f"CHAOXING_USERNAME_{idx}", cfg.get(f"username_{idx}", ""))
-        cfg["password"] = os.environ.get(
-            f"CHAOXING_PASSWORD_{idx}", cfg.get(f"password_{idx}", ""))
-        # 兜底：工作流矩阵也可能用通用变量名传入该账号凭据
-        if not cfg["username"]:
-            cfg["username"] = os.environ.get("CHAOXING_USERNAME", "")
-        if not cfg["password"]:
-            cfg["password"] = os.environ.get("CHAOXING_PASSWORD", "")
-    # 该账号负责的座位号（云端由矩阵任务指定）
+    cfg["username"] = os.environ.get("CHAOXING_USERNAME", cfg["username"])
+    cfg["password"] = os.environ.get("CHAOXING_PASSWORD", cfg["password"])
     cfg["seat_num"] = os.environ.get("SEAT_NUM", cfg["seat_num"])
     cfg["serverchan_key"] = os.environ.get("SERVERCHAN_KEY", cfg["serverchan_key"])
     if not cfg["username"] or not cfg["password"]:
@@ -867,23 +855,16 @@ RENEW_STEP = dt.timedelta(hours=4)
 
 
 def run_renew_all(cfg):
-    """续约巡检：一个云端 job 内顺序处理三个账号（省 Actions 分钟）。
-    单个账号异常不影响其余账号。"""
-    base = dict(cfg)
+    """续约巡检：当前仅账号1/263座。多账号时顺序处理、互不影响。"""
     accounts = []
-    for idx, seat_key in (("1", "seat_1"), ("2", "seat_2"), ("3", "seat_3")):
-        if idx == "1":
-            u, p = base.get("username"), base.get("password")
-        else:
-            u = os.environ.get(f"CHAOXING_USERNAME_{idx}",
-                               base.get(f"username_{idx}", ""))
-            p = os.environ.get(f"CHAOXING_PASSWORD_{idx}",
-                               base.get(f"password_{idx}", ""))
-        seat = base.get(seat_key) or base.get("seat_num")
-        if u and p and seat:
-            accounts.append((idx, u, p, str(seat)))
+    # 账号1：主账号（默认）
+    u, p = cfg.get("username", ""), cfg.get("password", "")
+    seat = cfg.get("seat_num", "")
+    if u and p and seat:
+        accounts.append(("1", u, p, str(seat)))
+    # 多账号扩展点（预留）：if cfg.get("username_2") ...
     for idx, u, p, seat in accounts:
-        sub = dict(base)
+        sub = dict(cfg)
         sub["username"], sub["password"], sub["seat_num"] = u, p, seat
         try:
             run_renew(sub, idx)
