@@ -12,7 +12,7 @@ name: 图书馆抢座
 # 签退六重冗余（北京时间）：21:48（保险，抵消GitHub启动延迟；脚本内部睡到21:55）/
 #   21:54（主）/ 21:58 / 22:00 / 22:02 / 22:04
 #   服务端窗口 21:55-22:20；22:05 仍未成功会提前微信预警，留手动补救时间
-# 三账号矩阵：账号1 -> 263 座，账号2 -> 258 座，账号3 -> 264 座，各自登录、各自抢座/签到/签退
+# 单账号：账号1 -> 263 座，多班次冗余由脚本识别状态后静默跳过
 # 重复的签到/签退/续约由脚本识别状态后静默跳过；只有真正执行成功的任务才推送微信
 on:
   schedule:
@@ -44,7 +44,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '运行模式（run=抢座 inspect=只测登录 signin=手动测签到 signback=手动测签退 enter=进馆模式仅263 renew=续约巡检三账号）'
+        description: '运行模式（run=抢座 inspect=只测登录 signin=手动测签到 signback=手动测签退 enter=进馆模式 renew=续约巡检）'
         type: choice
         default: run
         options:
