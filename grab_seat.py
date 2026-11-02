@@ -281,6 +281,9 @@ def classify(result):
         return "salt_expired", msg
     if any(k in msg for k in ("验证", "enc", "签名", "非法", "参数")):
         return "sign", msg
+    # 单日时长上限（2026-11 新规）：今天已占用 + 本次时长 > 15 小时，重试无意义
+    if any(k in msg for k in ("可预约及使用总时长", "15小时", "已占用")):
+        return "quota", msg
     return "taken", msg or str(result)
 
 def classify_sign(result, action):
@@ -312,6 +315,11 @@ def load_config():
     cfg["password"] = os.environ.get("CHAOXING_PASSWORD", cfg["password"])
     cfg["seat_num"] = os.environ.get("SEAT_NUM", cfg["seat_num"])
     cfg["serverchan_key"] = os.environ.get("SERVERCHAN_KEY", cfg["serverchan_key"])
+    # 日期偏移：0=约当天（0点补约班次），1=约次日（20:00 班次）
+    try:
+        cfg["day_offset"] = int(os.environ.get("DAY_OFFSET", cfg.get("day_offset", 1)))
+    except ValueError:
+        cfg["day_offset"] = 1
     if not cfg["username"] or not cfg["password"]:
         sys.exit(f"账号{idx}凭据缺失：请在 config.json 填写或配置对应环境变量/Secrets")
     return cfg
@@ -473,18 +481,26 @@ def run(cfg, mode):
         log(f"完整页面已保存：{page_path}")
         return
 
-    # 预约日期：北京时间明天（day_offset 可配置）
-    day = (now_bj().date() + dt.timedelta(days=cfg["day_offset"])).strftime("%Y-%m-%d")
+    # 预约日期：day_offset=0 约当天（0 点补约班次），=1 约次日（20:00 班次）
+    day_off = int(cfg.get("day_offset", 1))
+    day = (now_bj().date() + dt.timedelta(days=day_off)).strftime("%Y-%m-%d")
     log(f"目标日期：{day}")
 
-    if mode == "run":
+    if mode == "run" and day_off > 0:
         wait_until_target(cfg)
+    elif mode == "run":
+        log("当天补约班次：不等待 20:00，立即提交")
     else:
         log("dryrun 模式：不等待，立即提交")
 
-    deadline = today_at(cfg["giveup_time"])
-    if now_bj() >= deadline:  # 手动晚启动时自动延长 8 分钟
+    if day_off == 0:
+        # 0 点补约：只重试 8 分钟，避免长时间占用 Actions 额度
         deadline = now_bj() + dt.timedelta(minutes=8)
+        log(f"当天补约重试截止：{deadline.strftime('%H:%M')}")
+    else:
+        deadline = today_at(cfg["giveup_time"])
+        if now_bj() >= deadline:  # 手动晚启动时自动延长 8 分钟
+            deadline = now_bj() + dt.timedelta(minutes=8)
 
     segments = cfg["segments"]
     done = [False] * len(segments)
@@ -492,8 +508,9 @@ def run(cfg, mode):
     last_msg = {}
     attempts = 0
     lo, hi = cfg["retry_interval"]
+    quota_stop = False
 
-    while now_bj() < deadline and not all(done):
+    while now_bj() < deadline and not all(done) and not quota_stop:
         attempts += 1
         for i, (start, end) in enumerate(segments):
             if done[i]:
@@ -521,6 +538,10 @@ def run(cfg, mode):
                 grabber.login()
             elif kind == "salt_expired":
                 log(f"盐值失效，下一时段前自动刷新：{msg}")
+            elif kind == "quota":
+                # 单日 15 小时上限是硬规则，继续重试只是白耗额度
+                log(f"⛔ {start}-{end}：{msg}（当日时长已达上限，停止重试）")
+                quota_stop = True
             else:
                 log(f"❌ {start}-{end}：{msg}")
         if not all(done):
@@ -534,6 +555,11 @@ def run(cfg, mode):
     # 纯冗余任务：一个新时段都没抢到（全部是别人/另一任务已抢），静默不推送
     if all(done) and success_num == 0 and dup_num > 0:
         log(f"本任务为冗余运行，{dup_num} 个时段均已被另一任务抢到，不重复通知")
+        return
+
+    # 20:00 班次撞上单日 15 小时上限：属预期情况（0 点补约班次负责当天），静默退出避免每天刷告警
+    if quota_stop and success_num == 0 and dup_num == 0 and day_off > 0:
+        log("⛔ 当日已用时长触顶，20:00 无法预约次日场；改由 00:05 补约班次负责，静默退出")
         return
 
     title = f"座位{seat}抢座结果：{success_num + dup_num}/{len(segments)} 个时段成功"
