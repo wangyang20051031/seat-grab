@@ -58,6 +58,10 @@ on:
           - signback
           - enter
           - renew
+      day_offset:
+        description: '可选：0=约当天（补约），1=约次日；留空按班次自动'
+        required: false
+        default: ''
 
 # 不使用 concurrency 限制：定时任务并行作为冗余；重复操作由脚本识别状态后静默跳过。
 
@@ -88,7 +92,10 @@ jobs:
 
       - name: 判断目标日期
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "5 16 * * *" ]; then
+          if [ -n "${{ github.event.inputs.day_offset }}" ]; then
+            echo "DAY_OFFSET=${{ github.event.inputs.day_offset }}" >> "$GITHUB_ENV"
+            echo "手动指定目标日期偏移：${{ github.event.inputs.day_offset }}"
+          elif [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "5 16 * * *" ]; then
             echo "DAY_OFFSET=0" >> "$GITHUB_ENV"
             echo "00:05 当天补约班次：目标日期 = 今天"
           else
