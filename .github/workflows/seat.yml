@@ -3,6 +3,9 @@ name: 图书馆抢座
 # 抢座三重冗余（北京时间）：19:52 / 19:57 / 20:02，脚本内部精确等到 20:00:00
 #   （定时任务即使被 GitHub 延迟几分钟，启动后立即提交，不影响结果）
 #   新规：每天只抢 07:00-11:00 一段（单条≤4h、每日仅1条），全天靠续约延长
+#   另有一班 00:05 当天补约（DAY_OFFSET=0）：服务端有"单日累计≤15小时"上限，
+#   20:00 提交次日场时会把当天已用时长算进去，用满一天的会被拒；0 点已跨日、
+#   占用归零，必过。20:00 三班保留作低占用日的兜底，撞上限时静默退出不告警。
 # 续约巡检（北京时间）：10:10/10:35、14:10/14:35、15:10/15:35、16:35、17:10、
 #   18:10/18:35，共10班。脚本只在“记录距结束≤60分钟”时真正续约，其余静默；
 #   标准节奏 11:00→15:00→19:00→22:00（结束前约50/25分钟双保险，容忍GitHub延迟），
@@ -16,6 +19,7 @@ name: 图书馆抢座
 # 重复的签到/签退/续约由脚本识别状态后静默跳过；只有真正执行成功的任务才推送微信
 on:
   schedule:
+    - cron: '5 16 * * *'            # 抢座 北京时间 00:05（当天补约，占用已跨日归零）
     - cron: '52 11 * * *'           # 抢座 北京时间 19:52
     - cron: '57 11 * * *'           # 抢座 北京时间 19:57
     - cron: '2 12 * * *'            # 抢座 北京时间 20:02
@@ -66,7 +70,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' &&
         (github.event.inputs.mode == 'run' || github.event.inputs.mode == 'inspect')) ||
       (github.event_name == 'schedule' &&
-        contains(fromJSON('["52 11 * * *", "57 11 * * *", "2 12 * * *"]'),
+        contains(fromJSON('["5 16 * * *", "52 11 * * *", "57 11 * * *", "2 12 * * *"]'),
                  github.event.schedule))
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -82,10 +86,20 @@ jobs:
       - name: 安装依赖
         run: pip install requests cryptography
 
+      - name: 判断目标日期
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "5 16 * * *" ]; then
+            echo "DAY_OFFSET=0" >> "$GITHUB_ENV"
+            echo "00:05 当天补约班次：目标日期 = 今天"
+          else
+            echo "DAY_OFFSET=1" >> "$GITHUB_ENV"
+          fi
+
       - name: 执行抢座
         env:
           ACCOUNT_IDX: '1'
           SEAT_NUM: '263'
+          DAY_OFFSET: ${{ env.DAY_OFFSET }}
           CHAOXING_USERNAME: ${{ secrets.CHAOXING_USERNAME }}
           CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
