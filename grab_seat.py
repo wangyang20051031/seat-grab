@@ -745,10 +745,12 @@ def run_enter(cfg):
         finish_ok(title, "\n".join(lines))
         return
 
-    # 4. 计算当前半点场起点（刚过去的半点超过20分钟则约下一个半点）
+    # 4. 计算要约的半点场起点：超星对"开场已过"的场，新预约强制给学习中
+    #    （status=1）而不是待履约（status=0），刷脸会被拦。所以 start_dt
+    #    必须取"now 之后第一个还没开场的半点"，不能取已开场的半点。
     start_dt = now.replace(minute=30 if now.minute >= 30 else 0,
                            second=0, microsecond=0)
-    if (now - start_dt).total_seconds() > 20 * 60:
+    if now >= start_dt:                  # 开场已过哪怕1分钟 → 跳下一个半点
         start_dt += dt.timedelta(minutes=30)
     open_s = cfg["segments"][0][0]
     close_s = cfg.get("daily_close", cfg["segments"][-1][1])
