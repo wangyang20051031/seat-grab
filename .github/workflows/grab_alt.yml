@@ -19,6 +19,12 @@ on:
         required: true
         default: '3'
   schedule:
+    # 抢座（北京时间 19:52 / 19:57 / 20:02，约次日）
+    - cron: '52 11 * * *'
+    - cron: '57 11 * * *'
+    - cron: '2 12 * * *'
+    # 补约（北京时间 00:05，约当天）
+    - cron: '5 16 * * *'
     # 签到（北京时间 06:35 / 06:40 / 06:48 / 06:56 / 07:04 / 07:10）
     - cron: '35 22 * * *'
     - cron: '40 22 * * *'
@@ -36,8 +42,11 @@ on:
 jobs:
   alt-grab:
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      (github.event.inputs.mode == 'run' || github.event.inputs.mode == 'inspect')
+      (github.event_name == 'workflow_dispatch' &&
+        (github.event.inputs.mode == 'run' || github.event.inputs.mode == 'inspect')) ||
+      (github.event_name == 'schedule' &&
+        contains(fromJSON('["52 11 * * *", "57 11 * * *", "2 12 * * *", "5 16 * * *"]'),
+                 github.event.schedule))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -51,13 +60,13 @@ jobs:
         run: pip install requests cryptography
       - name: 执行抢座
         env:
-          ACCOUNT_IDX: ${{ github.event.inputs.account }}
-          SEAT_NUM: ${{ github.event.inputs.seat }}
-          DAY_OFFSET: ${{ github.event.inputs.day_offset }}
+          ACCOUNT_IDX: ${{ github.event.inputs.account || '3' }}
+          SEAT_NUM: ${{ github.event.inputs.seat || '141' }}
+          DAY_OFFSET: ${{ github.event.inputs.day_offset || ((github.event.schedule == '5 16 * * *') && '0' || '1') }}
           CHAOXING_USERNAME: ${{ (github.event.inputs.account == '2') && secrets.CHAOXING_USERNAME_2 || secrets.CHAOXING_USERNAME_3 }}
           CHAOXING_PASSWORD: ${{ (github.event.inputs.account == '2') && secrets.CHAOXING_PASSWORD_2 || secrets.CHAOXING_PASSWORD_3 }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
-        run: python grab_seat.py ${{ github.event.inputs.mode }}
+        run: python grab_seat.py ${{ github.event.inputs.mode || 'run' }}
   alt-signin:
     if: >-
       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'signin') ||
