@@ -1,0 +1,38 @@
+name: 备用账号抢座
+on:
+  workflow_dispatch:
+    inputs:
+      seat:
+        description: '座位号'
+        required: true
+        default: '141'
+      mode:
+        description: 'run / inspect / signin / signback'
+        required: true
+        default: 'run'
+      day_offset:
+        description: '0=今天 1=明天'
+        required: true
+        default: '1'
+jobs:
+  alt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装依赖
+        run: pip install requests cryptography
+      - name: 执行
+        env:
+          ACCOUNT_IDX: '2'
+          SEAT_NUM: ${{ github.event.inputs.seat }}
+          DAY_OFFSET: ${{ github.event.inputs.day_offset }}
+          CHAOXING_USERNAME: ${{ secrets.CHAOXING_USERNAME_2 }}
+          CHAOXING_PASSWORD: ${{ secrets.CHAOXING_PASSWORD_2 }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python grab_seat.py ${{ github.event.inputs.mode }}
