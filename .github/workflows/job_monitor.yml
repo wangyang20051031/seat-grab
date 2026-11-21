@@ -1,0 +1,47 @@
+name: 招聘监控
+
+# 北京时间 08:30 = UTC 00:30（GitHub Actions cron 为 UTC 时区）
+on:
+  schedule:
+    - cron: '30 0 * * *'   # 每天 北京时间 08:30
+  workflow_dispatch:       # 支持手动触发测试
+
+permissions:
+  contents: write   # 需写权限以将 seen.json 提交回仓库持久化
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install requests
+
+      - name: 运行招聘监控
+        env:
+          QQ_MAIL_USER: ${{ secrets.QQ_MAIL_USER }}
+          QQ_MAIL_AUTH_CODE: ${{ secrets.QQ_MAIL_AUTH_CODE }}
+          QQ_MAIL_TO: ${{ secrets.QQ_MAIL_TO }}
+          JOB_RECENT_DAYS: ${{ vars.JOB_RECENT_DAYS || '7' }}
+          JOB_MAX_ITEMS: ${{ vars.JOB_MAX_ITEMS || '30' }}
+        run: python -m job_monitor.main
+
+      - name: 持久化去重记录
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add job_monitor_seen.json
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(job_monitor): update seen.json"
+            git push
+          else
+            echo "seen.json 无变化，跳过提交。"
+          fi

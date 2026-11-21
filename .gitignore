@@ -6,3 +6,14 @@ __pycache__/
 # 调试产物
 seat_page.html
 *.log
+
+# 招聘监控：本地环境变量（含邮箱凭据，绝不入库）
+.env
+# 本地 IDE / 分享包目录（可能含个人信息，不入库）
+.trae/
+.trae-html-share-packages/
+# 本地数据文档（含个人信息的表格等，不入库）
+*.xlsx
+*.xls
+# 开发期临时探测目录
+_probe/
