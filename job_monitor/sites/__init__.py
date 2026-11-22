@@ -2,13 +2,16 @@
 """招聘站点爬虫集合。每个站点暴露 fetch() -> list[Announcement]。
 新增站点：在本目录加一个模块并在 SITES 注册即可。
 """
-from . import impta
+from . import bank, chnenergy, impta, railway, tobacco
 from .base import Announcement
 
 # (站点显示名, 抓取函数)
 SITES = [
     ("内蒙古人事考试网", impta.fetch),
-    # 更多站点待补充：国聘 / 内蒙古电力 / 国网蒙东 等（SPA 站点需先定位 API）
+    ("银行招聘网", bank.fetch),
+    ("中国烟草", tobacco.fetch),
+    ("国家能源集团", chnenergy.fetch),
+    ("中国铁路人才招聘网", railway.fetch),
 ]
 
 
